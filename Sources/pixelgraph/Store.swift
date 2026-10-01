@@ -61,6 +61,16 @@ final class Store {
             try? exec("ALTER TABLE \(table.rawValue) ADD COLUMN eyes REAL NOT NULL DEFAULT -1")
         }
         try exec("""
+            CREATE TABLE IF NOT EXISTS extras (
+                id TEXT NOT NULL,
+                field TEXT NOT NULL,
+                modified REAL NOT NULL,
+                version INTEGER NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (id, field)
+            )
+            """)
+        try exec("""
             CREATE TABLE IF NOT EXISTS suggestions (
                 id TEXT PRIMARY KEY,
                 modified REAL NOT NULL,
@@ -139,6 +149,32 @@ final class Store {
         sqlite3_bind_double(statement, 2, modified.timeIntervalSince1970)
         sqlite3_bind_int(statement, 3, Int32(Inspector.version))
         sqlite3_bind_text(statement, 4, reason ?? "", -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw StoreError(db) }
+    }
+
+    /// A cached JSON value for one photo (its document reading, description
+    /// or tags). Nil when missing, or when the photo or the analysis changed.
+    func extra<T: Decodable>(_ type: T.Type, id: String, field: String, modified: Date) -> T? {
+        guard let statement = prepare("SELECT value FROM extras WHERE id = ? AND field = ? AND modified = ? AND version = ?") else { return nil }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, id, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(statement, 2, field, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_double(statement, 3, modified.timeIntervalSince1970)
+        sqlite3_bind_int(statement, 4, Int32(Insight.version))
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        let json = Data(String(cString: sqlite3_column_text(statement, 0)).utf8)
+        return try? JSONDecoder().decode(T.self, from: json)
+    }
+
+    func saveExtra<T: Encodable>(_ value: T, id: String, field: String, modified: Date) throws {
+        guard let statement = prepare("INSERT OR REPLACE INTO extras VALUES (?, ?, ?, ?, ?)") else { throw StoreError(db) }
+        defer { sqlite3_finalize(statement) }
+        let json = String(decoding: try JSONEncoder().encode(value), as: UTF8.self)
+        sqlite3_bind_text(statement, 1, id, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(statement, 2, field, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_double(statement, 3, modified.timeIntervalSince1970)
+        sqlite3_bind_int(statement, 4, Int32(Insight.version))
+        sqlite3_bind_text(statement, 5, json, -1, SQLITE_TRANSIENT)
         guard sqlite3_step(statement) == SQLITE_DONE else { throw StoreError(db) }
     }
 

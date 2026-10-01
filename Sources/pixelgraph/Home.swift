@@ -3,7 +3,10 @@ import Foundation
 /// `pixelgraph` on its own: choose where your photos are, scan, review, and
 /// come back here for the next one.
 final class App {
-    private let options: Scanner.Options
+    private var options: Scanner.Options
+    /// The source waiting for "What should PixelGraph do?".
+    private var choosing: Source?
+    private var taskCursor = 0
     private let ui = UI()
 
     private enum Row {
@@ -50,12 +53,26 @@ final class App {
                 draw()
                 continue
             }
-            if prompt != nil {
-                if let source = editPrompt(key) { if try await scan(source) == .quit { return } }
+            if let source = choosing {
+                switch key {
+                case .up, .down: taskCursor = 1 - taskCursor
+                case .char(" "):
+                    if taskCursor == 0 { options.documents.toggle() } else { options.describe.toggle() }
+                case .enter:
+                    choosing = nil
+                    if try await scan(source) == .quit { return }
+                case .escape, .backspace: choosing = nil
+                case .quit, .char("q"): return
+                default: break
+                }
+            } else if prompt != nil {
+                if let source = editPrompt(key) { choosing = source; taskCursor = 0 }
             } else if let action = handle(key) {
                 switch action {
                 case .quit: return
-                case .scan(let source): if try await scan(source) == .quit { return }
+                case .scan(let source):
+                    choosing = source
+                    taskCursor = 0
                 }
             }
             draw()
@@ -83,7 +100,7 @@ final class App {
         if photosAllowed {
             let recentPhotos = recents.filter { $0.source.isPhotos }
             for entry in recentPhotos.prefix(3) {
-                rows.append(.source(entry.source, detail: "\(entry.photos) photos · last scan: \(entry.groups) groups"))
+                rows.append(.source(entry.source, detail: "\(entry.photos) photos · last scan: \(entry.groups) group\(entry.groups == 1 ? "" : "s")"))
             }
             let shown = Set(recentPhotos.map(\.source))
             for album in Library.albums().prefix(8) where !shown.contains(.album(id: album.id, title: album.title)) {
@@ -97,7 +114,7 @@ final class App {
         rows.append(.heading(""))
         rows.append(.heading("FOLDERS AND DRIVES"))
         for entry in recents.filter({ !$0.source.isPhotos }).prefix(4) {
-            rows.append(.source(entry.source, detail: "\(entry.source.kind.lowercased()) · last scan: \(entry.groups) groups"))
+            rows.append(.source(entry.source, detail: "\(entry.source.kind.lowercased()) · last scan: \(entry.groups) group\(entry.groups == 1 ? "" : "s")"))
         }
         for volume in externalVolumes() {
             rows.append(.browse(volume, title: volume.lastPathComponent, detail: "external drive"))
@@ -298,10 +315,10 @@ final class App {
         let visible = max(1, ui.rows - listTop - 3)
         if selected < scroll { scroll = selected }
         if selected >= scroll + visible { scroll = selected - visible + 1 }
-        let key = "\(screen) \(scroll) \(rows.count) \(ui.cols)x\(ui.rows) \(prompt ?? "-") \(message ?? "-")"
+        let key = "\(screen) \(scroll) \(rows.count) \(ui.cols)x\(ui.rows) \(prompt ?? "-") \(message ?? "-") \(choosing != nil) \(taskCursor) \(options.documents) \(options.describe)"
 
         var out: String
-        if key == drawnFrame, prompt == nil {
+        if key == drawnFrame, prompt == nil, choosing == nil {
             out = rowLine(drawnSelected) + rowLine(selected)
         } else {
             out = ui.clear()
@@ -314,6 +331,22 @@ final class App {
             out += ui.at(2, 3) + ui.clip(title, ui.cols - 4)
             for index in rows.indices.dropFirst(scroll).prefix(visible) { out += rowLine(index) }
             if let message { out += ui.at(ui.rows - 2, 3) + ui.clip(message, ui.cols - 4) }
+            if let source = choosing {
+                func task(_ index: Int?, _ on: Bool, _ name: String, _ detail: String) -> String {
+                    let box = on ? ui.green("[✓]") : "[ ]"
+                    let line = box + " " + name.padding(toLength: 22, withPad: " ", startingAt: 0) + ui.dim(detail)
+                    return index == taskCursor ? ui.blue("› ") + line : "  " + line
+                }
+                out += ui.sheet([
+                    ui.bold("What should PixelGraph do with \(ui.fit(source.description, 30))?"),
+                    "",
+                    task(nil, true, "Clean up duplicates", "keep the best, move the rest"),
+                    task(0, options.documents, "Sort documents", "receipts, forms, screenshots → PGDocuments"),
+                    task(1, options.describe, "Describe photos", "a short description and scene tags"),
+                    "",
+                    ui.dim("↑↓ choose · space tick · enter start · esc back"),
+                ], width: 82)
+            }
             if let prompt {
                 out += ui.sheet([
                     ui.bold("Choose a folder"),

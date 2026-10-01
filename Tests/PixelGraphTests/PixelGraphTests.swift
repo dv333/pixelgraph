@@ -158,25 +158,81 @@ private func scratchFolder() throws -> URL {
     #expect(companions == ["IMG_1.CR3", "IMG_1.xmp"])
 }
 
-@Test func folderMovesKeepLayoutAndUndoPutsThemBack() async throws {
-    let folder = try scratchFolder()
-    defer { try? FileManager.default.removeItem(at: folder) }
-    let day = folder.appendingPathComponent("Day 1")
-    try FileManager.default.createDirectory(at: day, withIntermediateDirectories: true)
-    for name in ["IMG_1.JPG", "IMG_1.CR3"] {
-        FileManager.default.createFile(atPath: day.appendingPathComponent(name).path, contents: Data("x".utf8))
+
+// MARK: - Documents
+
+private let formA = """
+    U.S. Department of Homeland Security I-797C Notice of Action
+    Receipt Number IOE0912345678 Case Type I-765 Application for Employment Authorization
+    Applicant ANITA KUMAR Received Date 03/14/2025 Priority Date Notice Date 03/18/2025
+    """
+private let formB = """
+    U.S. Department of Homeland Security I-797C Notice of Action
+    Receipt Number IOE0998877665 Case Type I-131 Application for Travel Document
+    Applicant RAVI MENON Received Date 07/02/2024 Priority Date Notice Date 07/09/2024
+    """
+
+@Test func sameTemplateDifferentContentIsNotADuplicate() {
+    #expect(Insight.similarity(formA, formB) < 0.85)
+    // The same page read twice, with an OCR slip, still matches.
+    let reread = formA.replacingOccurrences(of: "Employment", with: "Employrnent")
+    #expect(Insight.similarity(formA, reread) >= 0.85)
+}
+
+@Test func documentCopiesGroupByText() {
+    let a = photo("a", 0), b = photo("b", 0.05, at: 86_400), c = photo("c", 0.02, at: 3_600)
+    let documents: [String: Insight.Document] = [
+        "a": Insight.Document(kind: "Form", title: "I-797C notice", text: formA),
+        "b": Insight.Document(kind: "Form", title: "I-797C notice", text: formA + "\nPage 1 of 1"),
+        "c": Insight.Document(kind: "Form", title: "I-797C notice", text: formB),
+    ]
+    let groups = Scanner.documentGroups([a, b, c], documents).map { Set($0.map(\.id)) }
+    #expect(Set(groups) == [["a", "b"], ["c"]])
+}
+
+
+/// Moves share one undo log, so these run one at a time.
+@Suite(.serialized)
+struct MoveTests {
+    @Test func folderMovesKeepLayoutAndUndoPutsThemBack() async throws {
+        let folder = try scratchFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let day = folder.appendingPathComponent("Day 1")
+        try FileManager.default.createDirectory(at: day, withIntermediateDirectories: true)
+        for name in ["IMG_1.JPG", "IMG_1.CR3"] {
+            FileManager.default.createFile(atPath: day.appendingPathComponent(name).path, contents: Data("x".utf8))
+        }
+        let id = Item.fileID(day.appendingPathComponent("IMG_1.JPG"))
+
+        let record = try await Mover.move([id], from: .folder(path: folder.path))
+        let moved = folder.appendingPathComponent("\(Files.duplicatesFolder)/Day 1")
+        #expect(record.files.count == 2)
+        #expect(FileManager.default.fileExists(atPath: moved.appendingPathComponent("IMG_1.JPG").path))
+        #expect(FileManager.default.fileExists(atPath: moved.appendingPathComponent("IMG_1.CR3").path))
+        #expect(!FileManager.default.fileExists(atPath: day.appendingPathComponent("IMG_1.JPG").path))
+
+        try await Mover.undoLast()
+        #expect(FileManager.default.fileExists(atPath: day.appendingPathComponent("IMG_1.JPG").path))
+        #expect(FileManager.default.fileExists(atPath: day.appendingPathComponent("IMG_1.CR3").path))
+        #expect(!FileManager.default.fileExists(atPath: folder.appendingPathComponent(Files.duplicatesFolder).path))
     }
-    let id = Item.fileID(day.appendingPathComponent("IMG_1.JPG"))
 
-    let record = try await Mover.move([id], from: .folder(path: folder.path))
-    let moved = folder.appendingPathComponent("\(Files.duplicatesFolder)/Day 1")
-    #expect(record.files.count == 2)
-    #expect(FileManager.default.fileExists(atPath: moved.appendingPathComponent("IMG_1.JPG").path))
-    #expect(FileManager.default.fileExists(atPath: moved.appendingPathComponent("IMG_1.CR3").path))
-    #expect(!FileManager.default.fileExists(atPath: day.appendingPathComponent("IMG_1.JPG").path))
+    @Test func filingDocumentsAndCopiesUndoesInOneStep() async throws {
+        let folder = try scratchFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        for name in ["receipt.jpg", "receipt copy.jpg"] {
+            FileManager.default.createFile(atPath: folder.appendingPathComponent(name).path, contents: Data("x".utf8))
+        }
+        let source = Source.folder(path: folder.path)
+        let batch = UUID()
+        _ = try await Mover.move([Item.fileID(folder.appendingPathComponent("receipt.jpg"))], from: source, to: .documents, batch: batch)
+        _ = try await Mover.move([Item.fileID(folder.appendingPathComponent("receipt copy.jpg"))], from: source, to: .duplicates, batch: batch)
+        #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("PGDocuments/receipt.jpg").path))
+        #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("PixelGraph Duplicates/receipt copy.jpg").path))
 
-    try await Mover.undoLast()
-    #expect(FileManager.default.fileExists(atPath: day.appendingPathComponent("IMG_1.JPG").path))
-    #expect(FileManager.default.fileExists(atPath: day.appendingPathComponent("IMG_1.CR3").path))
-    #expect(!FileManager.default.fileExists(atPath: folder.appendingPathComponent(Files.duplicatesFolder).path))
+        let undone = try await Mover.undoLast()
+        #expect(undone?.ids.count == 2)
+        #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("receipt.jpg").path))
+        #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("receipt copy.jpg").path))
+    }
 }

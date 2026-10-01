@@ -10,10 +10,13 @@ struct Run: Codable {
     var scanned: Int
     var rules: GroupingRules
     var groups: [Group]
+    /// Documents found in the scan (Sort documents), each in a group of
+    /// copies with the same text; nil when documents weren't sorted.
+    var documentGroups: [Group]?
 
     struct Group: Codable {
         enum Kind: String, Codable {
-            case copies, moment, scene, screenshots
+            case copies, moment, scene, screenshots, documents
 
             var title: String {
                 switch self {
@@ -21,6 +24,7 @@ struct Run: Codable {
                 case .moment: "Same moment"
                 case .scene: "Same scene"
                 case .screenshots: "Screenshots"
+                case .documents: "Documents"
                 }
             }
         }
@@ -45,6 +49,14 @@ struct Run: Codable {
         /// Long side of the image the scores came from; under 1024 means the
         /// original was in iCloud and couldn't be downloaded.
         var previewSide: Int
+        /// A one-line description and scene tags, when made.
+        var summary: String?
+        var tags: [String]?
+        /// For documents: what it is ("Receipt · Pier 39 Café"), its first
+        /// words, and how alike its text is to the copy being filed.
+        var document: String?
+        var excerpt: String?
+        var sameText: Double?
     }
 
     /// Best first, then kept photos, then the ones moving, moved last.
@@ -61,6 +73,16 @@ struct Run: Codable {
     /// Photos selected to move, across all groups.
     var toMove: [String] {
         groups.flatMap { g in g.photos.map(\.id).filter { g.pick.willMove($0) } }
+    }
+
+    /// Documents to file in PGDocuments (the best copy in each group) and the
+    /// extra copies that go to Duplicates.
+    var documentsToFile: [String] {
+        (documentGroups ?? []).flatMap { g in g.pick.keepers.filter { !g.pick.moved.contains($0) } }
+    }
+
+    var documentCopies: [String] {
+        (documentGroups ?? []).flatMap { g in g.photos.map(\.id).filter { g.pick.willMove($0) } }
     }
 
     func save(to url: URL = Paths.lastRun) throws {

@@ -38,7 +38,7 @@ enum Library {
         var result: [Album] = []
         PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil)
             .enumerateObjects { collection, _, _ in
-                guard collection.localizedTitle != duplicatesAlbum else { return }
+                guard collection.localizedTitle != duplicatesAlbum, collection.localizedTitle != documentsAlbum else { return }
                 let count = PHAsset.fetchAssets(in: collection, options: imagesOnly()).count
                 guard count > 0 else { return }
                 result.append(Album(id: collection.localIdentifier, title: collection.localizedTitle ?? "Untitled",
@@ -100,16 +100,17 @@ enum Library {
     // MARK: - Duplicates album
 
     static let duplicatesAlbum = "PixelGraph Duplicates"
+    static let documentsAlbum = "PGDocuments"
 
-    /// Adds photos to the Duplicates album (creating it if needed) and takes
-    /// them out of `album`. Nothing leaves the library.
-    static func moveToDuplicates(_ ids: [String], from album: String?) async throws {
+    /// Adds photos to the album called `destination` (creating it if needed)
+    /// and takes them out of `album`. Nothing leaves the library.
+    static func move(_ ids: [String], to destination: String, from album: String?) async throws {
         let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
-        let existing = Library.album(named: duplicatesAlbum)
+        let existing = Library.album(named: destination)
         let source = album.flatMap { PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [$0], options: nil).firstObject }
         try await PHPhotoLibrary.shared().performChanges {
             let duplicates = existing.flatMap { PHAssetCollectionChangeRequest(for: $0) }
-                ?? PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: duplicatesAlbum)
+                ?? PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: destination)
             duplicates.addAssets(assets)
             if let source, source.canPerform(.removeContent) {
                 PHAssetCollectionChangeRequest(for: source)?.removeAssets(assets)
@@ -117,10 +118,10 @@ enum Library {
         }
     }
 
-    /// Reverses `moveToDuplicates`.
-    static func restore(_ ids: [String], to album: String?) async throws {
+    /// Reverses `move`.
+    static func restore(_ ids: [String], from destination: String, to album: String?) async throws {
         let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
-        let duplicates = Library.album(named: duplicatesAlbum)
+        let duplicates = Library.album(named: destination)
         let source = album.flatMap { PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [$0], options: nil).firstObject }
         try await PHPhotoLibrary.shared().performChanges {
             if let duplicates { PHAssetCollectionChangeRequest(for: duplicates)?.removeAssets(assets) }

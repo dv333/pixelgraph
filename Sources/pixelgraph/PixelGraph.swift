@@ -35,10 +35,16 @@ struct ScanOptions: ParsableArguments {
     @Flag(help: "Never download from iCloud; judge photos from the previews on this Mac.")
     var offline = false
 
+    @Flag(help: "Leave documents (receipts, forms, screenshots) among the other photos instead of sorting them for PGDocuments.")
+    var noDocuments = false
+
+    @Flag(help: "Don't describe and tag the photos in groups.")
+    var noDescribe = false
+
     var scanner: Scanner.Options {
         Scanner.Options(
             rules: GroupingRules(momentThreshold: momentThreshold, momentWindow: momentWindow, sceneThreshold: sceneThreshold),
-            useModel: !noModel, offline: offline)
+            useModel: !noModel, offline: offline, documents: !noDocuments, describe: !noDescribe)
     }
 }
 
@@ -189,16 +195,21 @@ extension Run {
     /// Marks photos as moved after a move to Duplicates.
     mutating func markMoved(_ ids: [String]) {
         let set = Set(ids)
-        for g in groups.indices {
-            let newlyMoved = groups[g].photos.map(\.id).filter { set.contains($0) && !groups[g].pick.moved.contains($0) }
-            groups[g].pick.moved += newlyMoved
+        func mark(_ list: inout [Group]) {
+            for g in list.indices {
+                let newlyMoved = list[g].photos.map(\.id).filter { set.contains($0) && !list[g].pick.moved.contains($0) }
+                list[g].pick.moved += newlyMoved
+            }
         }
+        mark(&groups)
+        if documentGroups != nil { mark(&documentGroups!) }
     }
 
     /// Reverses `markMoved` after an undo.
     mutating func unmark(_ ids: [String]) {
         let set = Set(ids)
         for g in groups.indices { groups[g].pick.moved.removeAll { set.contains($0) } }
+        for g in (documentGroups ?? []).indices { documentGroups![g].pick.moved.removeAll { set.contains($0) } }
     }
 
 }

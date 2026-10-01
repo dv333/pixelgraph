@@ -1,6 +1,6 @@
 import Foundation
 
-/// Moves photos to Duplicates and back.
+/// Moves photos to Duplicates or PGDocuments, and back.
 ///
 /// Apple Photos: into the "PixelGraph Duplicates" album and out of the album
 /// that was scanned; nothing leaves the library. Folders and drives: into a
@@ -8,9 +8,20 @@ import Foundation
 /// layout, with RAW twins and sidecars alongside. Every move is logged so the
 /// last one can be undone.
 enum Mover {
+    enum Destination: String, Codable {
+        case duplicates, documents
+
+        var album: String { self == .duplicates ? Library.duplicatesAlbum : Library.documentsAlbum }
+        var folder: String { self == .duplicates ? Files.duplicatesFolder : Files.documentsFolder }
+    }
+
     struct Record: Codable {
         var date: Date
         var source: Source
+        /// Nil in records from before PGDocuments existed: Duplicates.
+        var destination: Destination?
+        /// Moves made together (documents and their copies) share a batch and undo together.
+        var batch: UUID?
         /// Photo ids as they were before the move.
         var ids: [String]
         /// For folders: where each file went.
@@ -24,17 +35,18 @@ enum Mover {
 
     static var log: URL { Paths.root.appendingPathComponent("moves.json") }
 
-    static func move(_ ids: [String], from source: Source) async throws -> Record {
-        var record = Record(date: .now, source: source, ids: ids, files: [])
+    static func move(_ ids: [String], from source: Source, to target: Destination = .duplicates,
+                     batch: UUID = UUID()) async throws -> Record {
+        var record = Record(date: .now, source: source, destination: target, batch: batch, ids: ids, files: [])
         switch source {
         case .album(let id, _):
-            try await Library.moveToDuplicates(ids, from: id)
+            try await Library.move(ids, to: target.album, from: id)
         case .dates:
-            try await Library.moveToDuplicates(ids, from: nil)
+            try await Library.move(ids, to: target.album, from: nil)
         case .folder(let path):
             // Resolve symlinks (/var → /private/var) so paths line up.
             let root = URL(fileURLWithPath: path).resolvingSymlinksInPath()
-            let destination = root.appendingPathComponent(Files.duplicatesFolder, isDirectory: true)
+            let destination = root.appendingPathComponent(target.folder, isDirectory: true)
             for id in ids where id.hasPrefix("file:") {
                 let file = URL(fileURLWithPath: String(id.dropFirst(5))).resolvingSymlinksInPath()
                 for url in [file] + Files.companions(of: file).map({ $0.resolvingSymlinksInPath() }) {
@@ -52,24 +64,31 @@ enum Mover {
         return record
     }
 
-    /// Undoes the most recent move. Returns it, or nil when there's nothing to undo.
+    /// Undoes the most recent move (all of it, if it went to two places).
+    /// Returns the photo ids put back, or nil when there's nothing to undo.
     @discardableResult
-    static func undoLast() async throws -> Record? {
+    static func undoLast() async throws -> (source: Source, ids: [String])? {
         var records = history()
-        guard let record = records.popLast() else { return nil }
-        switch record.source {
-        case .album(let id, _): try await Library.restore(record.ids, to: id)
-        case .dates: try await Library.restore(record.ids, to: nil)
-        case .folder:
-            for move in record.files.reversed() {
-                let back = URL(fileURLWithPath: move.from)
-                try FileManager.default.createDirectory(at: back.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try FileManager.default.moveItem(at: URL(fileURLWithPath: move.to), to: back)
-                removeEmptyFolders(from: URL(fileURLWithPath: move.to).deletingLastPathComponent())
+        guard let last = records.last else { return nil }
+        var undone: [String] = []
+        while let record = records.last, record.batch == last.batch, record.batch != nil || record.date == last.date {
+            records.removeLast()
+            let destination = record.destination ?? .duplicates
+            switch record.source {
+            case .album(let id, _): try await Library.restore(record.ids, from: destination.album, to: id)
+            case .dates: try await Library.restore(record.ids, from: destination.album, to: nil)
+            case .folder:
+                for move in record.files.reversed() {
+                    let back = URL(fileURLWithPath: move.from)
+                    try FileManager.default.createDirectory(at: back.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try FileManager.default.moveItem(at: URL(fileURLWithPath: move.to), to: back)
+                    removeEmptyFolders(from: URL(fileURLWithPath: move.to).deletingLastPathComponent())
+                }
             }
+            undone += record.ids
+            try save(records)
         }
-        try save(records)
-        return record
+        return (last.source, undone)
     }
 
     static func history() -> [Record] {
@@ -101,7 +120,7 @@ enum Mover {
     /// Tidies up folders left empty under "PixelGraph Duplicates" after an undo.
     private static func removeEmptyFolders(from folder: URL) {
         var current = folder
-        while current.path.contains("/\(Files.duplicatesFolder)"),
+        while current.path.contains("/\(Files.duplicatesFolder)") || current.path.contains("/\(Files.documentsFolder)"),
               let contents = try? FileManager.default.contentsOfDirectory(atPath: current.path),
               contents.filter({ $0 != ".DS_Store" }).isEmpty {
             try? FileManager.default.removeItem(at: current)

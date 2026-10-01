@@ -8,14 +8,18 @@ struct Scanner {
         var rules = GroupingRules(momentThreshold: 0.5, momentWindow: 600, sceneThreshold: 0.3)
         var useModel = true
         var offline = false
+        /// Gather documents into their own tab, to file in PGDocuments.
+        var documents = true
+        /// Describe and tag the photos in groups.
+        var describe = true
     }
 
     let source: Source
     let options: Options
     let board: ProgressBoard
 
-    static let stages = ["Read photos", "Fingerprint", "Group lookalikes", "Score grouped photos",
-                         "Check eyes and faces", "Pick the best shots", "Prepare previews"]
+    static let stages = ["Read photos", "Fingerprint", "Find documents", "Group lookalikes", "Score grouped photos",
+                         "Check eyes and faces", "Describe photos", "Pick the best shots", "Prepare previews"]
 
     init(source: Source, options: Options, fullScreen: Bool = false) {
         self.source = source
@@ -33,55 +37,200 @@ struct Scanner {
         board.finish(0, detail: "\(items.count.formatted()) photos" + (cloudOnly > 0 ? ", \(cloudOnly) in iCloud only" : ""))
 
         let photos = try await fingerprint(items)
-        board.start(2)
-        let indexGroups = Grouper.groups(photos, rules: options.rules)
-        let groupedCount = indexGroups.reduce(0) { $0 + $1.count }
-        board.finish(2, detail: "\(indexGroups.count) groups · \(groupedCount) photos")
-        board.setSummary(summary(groups: indexGroups.count, moving: groupedCount - indexGroups.count, problems: 0))
-
-        let grouped = indexGroups.flatMap { $0 }.map { photos[$0] }
-        let rescored = try await score(grouped, lookup)
-        let photosNow = photos.map { rescored[$0.id] ?? $0 }
         let useModel = options.useModel && Picker.modelAvailable
-        let problems = try await inspect(indexGroups.flatMap { $0 }.map { photosNow[$0] }, lookup, useModel: useModel)
-        board.setSummary(summary(groups: indexGroups.count, moving: groupedCount - indexGroups.count, problems: problems.count))
 
-        board.start(5, total: indexGroups.count)
+        // Documents are matched by what they say, not just how they look:
+        // two forms from one template look identical but aren't duplicates.
+        let documents = try await findDocuments(photos, lookup, useModel: useModel)
+        let others = photos.filter { documents[$0.id] == nil }
+        let docPhotos = photos.filter { documents[$0.id] != nil }
+
+        board.start(3)
+        let lookalikes = Grouper.groups(others, rules: options.rules).map { $0.map { others[$0] } }
+        let copies = Self.documentGroups(docPhotos, documents)
+        let groupedCount = lookalikes.reduce(0) { $0 + $1.count }
+        board.finish(3, detail: "\(lookalikes.count) groups · \(groupedCount) photos"
+            + (docPhotos.isEmpty ? "" : " · \(copies.filter { $0.count > 1 }.count) documents with copies"))
+        board.setSummary(summary(groups: lookalikes.count, moving: groupedCount - lookalikes.count, problems: 0, documents: docPhotos.count))
+
+        let toScore = lookalikes.flatMap { $0 } + copies.filter { $0.count > 1 }.flatMap { $0 }
+        let rescored = try await score(toScore, lookup)
+        let now: (Photo) -> Photo = { rescored[$0.id] ?? $0 }
+        let groupedNow = lookalikes.map { $0.map(now) }
+        let copiesNow = copies.map { $0.map(now) }
+
+        let problems = try await inspect(groupedNow.flatMap { $0 }, lookup, useModel: useModel)
+        let described = options.describe ? try await describe(groupedNow.flatMap { $0 }, lookup, useModel: useModel) : [:]
+        if !options.describe { board.skip(6, detail: "off") }
+        board.setSummary(summary(groups: lookalikes.count, moving: groupedCount - lookalikes.count,
+                                 problems: problems.count, documents: docPhotos.count))
+
+        board.start(7, total: groupedNow.count + copiesNow.count)
         var groups: [Run.Group] = []
         let fetch = fetchPolicy
-        for (n, indices) in indexGroups.enumerated() {
-            let members = indices.map { photosNow[$0] }
-            groups.append(Run.Group(
+        for (n, members) in groupedNow.enumerated() {
+            var group = Run.Group(
                 kind: Run.Group.Kind(members, rules: options.rules),
                 photos: members.map(Run.Member.init),
                 pick: await Picker.pick(members, useModel: useModel, problems: problems) { id in
                     await lookup[id]?.image(maxSide: 768, fetch: fetch)
-                }
-            ))
-            board.advance(5, done: n + 1)
+                })
+            for i in group.photos.indices {
+                group.photos[i].summary = described[group.photos[i].id]?.summary
+                group.photos[i].tags = described[group.photos[i].id]?.tags
+            }
+            groups.append(group)
+            board.advance(7, done: n + 1)
+        }
+        var documentGroups: [Run.Group] = []
+        for (n, members) in copiesNow.enumerated() {
+            documentGroups.append(await documentGroup(members, documents))
+            board.advance(7, done: groupedNow.count + n + 1)
         }
         let closeCalls = groups.filter { $0.pick.decidedBy == "apple-model" }.count
-        board.finish(5, detail: closeCalls > 0 ? "\(closeCalls) close call\(closeCalls == 1 ? "" : "s") settled by Apple Intelligence" : "clear winners")
+        board.finish(7, detail: closeCalls > 0 ? "\(closeCalls) close call\(closeCalls == 1 ? "" : "s") settled by Apple Intelligence" : "clear winners")
 
         var run = Run(date: .now, scope: source.description, scanned: photos.count, rules: options.rules, groups: groups)
         run.source = source
+        if options.documents {
+            run.documentGroups = documentGroups
+        } else {
+            // Not sorting documents: copies of the same document are still duplicates.
+            run.groups += documentGroups.filter { $0.photos.count > 1 }
+        }
         try run.save()
 
-        board.start(6, total: groupedCount)
-        try await Report.write(run, items: lookup, offline: options.offline) { done, _ in board.advance(6, done: done) }
-        board.finish(6, detail: "ready to review")
-        board.setSummary(summary(groups: groups.count, moving: run.toMove.count, problems: problems.count))
+        let previewCount = run.groups.reduce(0) { $0 + $1.photos.count } + (run.documentGroups ?? []).reduce(0) { $0 + $1.photos.count }
+        board.start(8, total: previewCount)
+        try await Report.write(run, items: lookup, offline: options.offline) { done, _ in board.advance(8, done: done) }
+        board.finish(8, detail: "ready to review")
+        board.setSummary(summary(groups: groups.count, moving: run.toMove.count, problems: problems.count,
+                                 documents: run.documentGroups.map { $0.reduce(0) { $0 + $1.photos.count } } ?? 0))
         board.end()
         Recents.record(run)
         return run
     }
 
+    /// Copies of the same document: their text is at least 85% the same
+    /// words, or, for screenshots with little text, the images are near-exact.
+    static func documentGroups(_ photos: [Photo], _ documents: [String: Insight.Document]) -> [[Photo]] {
+        var parent = Array(photos.indices)
+        func root(_ i: Int) -> Int { parent[i] == i ? i : root(parent[i]) }
+        for i in photos.indices {
+            for j in photos.indices where j > i {
+                let (a, b) = (documents[photos[i].id]?.text ?? "", documents[photos[j].id]?.text ?? "")
+                let wordy = Insight.words(a).count >= 8 && Insight.words(b).count >= 8
+                let same = wordy ? Insight.similarity(a, b) >= 0.85 : Grouper.distance(photos[i], photos[j]) < 0.06
+                if same { parent[root(j)] = root(i) }
+            }
+        }
+        return Dictionary(grouping: photos.indices, by: root).values
+            .map { $0.map { photos[$0] }.sorted { $0.date < $1.date } }
+            .sorted { $0[0].date < $1[0].date }
+    }
+
+    /// The sharpest copy is filed in PGDocuments; other copies go to Duplicates.
+    private func documentGroup(_ members: [Photo], _ documents: [String: Insight.Document]) async -> Run.Group {
+        var pick = members.count > 1
+            ? await Picker.pick(members, useModel: false)
+            : Pick(best: members[0].id, decidedBy: "vision", notes: [members[0].id: "only copy"])
+        let bestText = documents[pick.best]?.text ?? ""
+        var photos = members.map(Run.Member.init)
+        for i in photos.indices {
+            guard let doc = documents[photos[i].id] else { continue }
+            photos[i].document = doc.label
+            photos[i].excerpt = doc.text.split(separator: "\n").map(String.init).first { $0.count > 3 }.map { String($0.prefix(80)) }
+            if photos[i].id != pick.best, members.count > 1 {
+                photos[i].sameText = Insight.similarity(doc.text, bestText)
+                pick.notes[photos[i].id] = "copy of the filed one"
+            }
+        }
+        if members.count > 1 { pick.notes[pick.best] = "sharpest copy" }
+        return Run.Group(kind: .documents, photos: photos, pick: pick)
+    }
+
     private var fetchPolicy: Library.Fetch { options.offline ? .localOnly : .download(timeout: 60) }
 
-    private func summary(groups: Int, moving: Int, problems: Int) -> String {
+    private func summary(groups: Int, moving: Int, problems: Int, documents: Int) -> String {
         var parts = ["\u{1B}[1m\(groups)\u{1B}[22m groups", "\u{1B}[1m\(moving)\u{1B}[22m photos you could move"]
+        if documents > 0 { parts.append("\u{1B}[1m\(documents)\u{1B}[22m documents") }
         if problems > 0 { parts.append(Theme.fg(Theme.amber) + "\(problems)\u{1B}[39m look like rejects") }
         return parts.joined(separator: " · ")
+    }
+
+    /// Reads the text in utility shots and screenshots and keeps the ones
+    /// that are documents. Cached per photo.
+    private func findDocuments(_ photos: [Photo], _ lookup: [String: Item], useModel: Bool) async throws -> [String: Insight.Document] {
+        struct Cached: Codable { var document: Insight.Document? }
+        let store = try Store()
+        let candidates = photos.filter { $0.analysis.isUtility || $0.isScreenshot }
+        var found: [String: Insight.Document] = [:]
+        var pending: [(Photo, Item)] = []
+        for photo in candidates {
+            guard let item = lookup[photo.id] else { continue }
+            if let cached = store.extra(Cached.self, id: photo.id, field: "document", modified: item.modified) {
+                if let doc = cached.document { found[photo.id] = doc }
+            } else {
+                pending.append((photo, item))
+            }
+        }
+        guard !pending.isEmpty else {
+            board.finish(2, detail: found.isEmpty ? "none" : "\(found.count) documents")
+            return found
+        }
+        board.start(2, total: pending.count)
+        let fetch = fetchPolicy
+        for (n, (photo, item)) in pending.enumerated() {
+            if let image = await item.image(maxSide: 1600, fetch: fetch) {
+                let doc = await Insight.document(image, isScreenshot: photo.isScreenshot, useModel: useModel)
+                if let doc { found[photo.id] = doc }
+                // Without the model the reading is rougher; don't keep it as final.
+                if useModel { try store.saveExtra(Cached(document: doc), id: photo.id, field: "document", modified: item.modified) }
+            }
+            board.advance(2, done: n + 1)
+        }
+        let kinds = Dictionary(grouping: found.values, by: \.kind).map { "\($0.value.count) \($0.key.lowercased())" }.sorted()
+        board.finish(2, detail: found.isEmpty ? "none" : "\(found.count) documents (\(kinds.prefix(3).joined(separator: ", ")))")
+        return found
+    }
+
+    struct Described: Codable {
+        var summary: String?
+        var tags: [String]
+    }
+
+    /// A one-line description (Apple's model) and scene tags (Vision) for
+    /// each grouped photo. Cached per photo.
+    private func describe(_ photos: [Photo], _ lookup: [String: Item], useModel: Bool) async throws -> [String: Described] {
+        let store = try Store()
+        var result: [String: Described] = [:]
+        var pending: [(Photo, Item)] = []
+        for photo in photos {
+            guard let item = lookup[photo.id] else { continue }
+            if let cached = store.extra(Described.self, id: photo.id, field: "described", modified: item.modified),
+               cached.summary != nil || !useModel {
+                result[photo.id] = cached
+            } else {
+                pending.append((photo, item))
+            }
+        }
+        guard !pending.isEmpty else {
+            board.finish(6, detail: photos.isEmpty ? "nothing to describe" : "\(photos.count) photos, already described")
+            return result
+        }
+        board.start(6, total: pending.count)
+        let fetch = fetchPolicy
+        for (n, (photo, item)) in pending.enumerated() {
+            if let image = await item.image(maxSide: 768, fetch: fetch) {
+                let described = Described(summary: useModel ? await Insight.describe(image) : nil,
+                                          tags: await Insight.sceneTags(image))
+                result[photo.id] = described
+                try store.saveExtra(described, id: photo.id, field: "described", modified: item.modified)
+            }
+            board.advance(6, done: n + 1)
+        }
+        board.finish(6, detail: useModel ? "\(pending.count) photos described" : "\(pending.count) photos tagged (no Apple Intelligence)")
+        return result
     }
 
     // MARK: - Stages
@@ -164,11 +313,11 @@ struct Scanner {
             }
         }
         guard !pending.isEmpty else {
-            board.finish(3, detail: photos.isEmpty ? "nothing to score" : "\(photos.count) photos, already scored")
+            board.finish(4, detail: photos.isEmpty ? "nothing to score" : "\(photos.count) photos, already scored")
             return result
         }
 
-        board.start(3, total: pending.count)
+        board.start(4, total: pending.count)
         let fetch = fetchPolicy
         var done = 0, small = 0
         try await withThrowingTaskGroup(of: (Photo, Item, Analysis?).self) { tasks in
@@ -190,11 +339,11 @@ struct Scanner {
                     try store.save(analysis, id: photo.id, modified: item.modified, in: .detail)
                     if photo.isPreviewOnly(analysis) { small += 1 }
                 }
-                board.advance(3, done: done)
+                board.advance(4, done: done)
                 add()
             }
         }
-        board.finish(3, detail: "\(pending.count) photos" + (small > 0 ? ", \(small) from small previews (iCloud)" : ""))
+        board.finish(4, detail: "\(pending.count) photos" + (small > 0 ? ", \(small) from small previews (iCloud)" : ""))
         return result
     }
 
@@ -213,11 +362,11 @@ struct Scanner {
             }
         }
         guard !pending.isEmpty else {
-            board.finish(4, detail: problems.isEmpty ? "no problems spotted" : "\(problems.count) look like rejects")
+            board.finish(5, detail: problems.isEmpty ? "no problems spotted" : "\(problems.count) look like rejects")
             return problems
         }
 
-        board.start(4, total: pending.count)
+        board.start(5, total: pending.count)
         let fetch = fetchPolicy
         for (n, (photo, item)) in pending.enumerated() {
             if let image = await item.image(maxSide: 768, fetch: fetch) {
@@ -226,10 +375,10 @@ struct Scanner {
                 // Without the model the check is rougher; don't keep it as final.
                 if useModel { try store.saveSuggestion(reason, id: photo.id, modified: item.modified) }
             }
-            board.advance(4, done: n + 1)
+            board.advance(5, done: n + 1)
         }
         let kinds = Set(problems.values).sorted().joined(separator: ", ")
-        board.finish(4, detail: problems.isEmpty ? "no problems spotted" : "\(problems.count) look like rejects (\(kinds))")
+        board.finish(5, detail: problems.isEmpty ? "no problems spotted" : "\(problems.count) look like rejects (\(kinds))")
         return problems
     }
 }

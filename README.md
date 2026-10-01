@@ -62,10 +62,18 @@ One key means one thing on every screen, and keys set a state rather than toggli
 
 In iTerm2 photos are shown as real images; other true-colour terminals get colour-block previews.
 
+### Documents
+
+Receipts, bills, forms, letters, IDs, tickets, notes, whiteboards, screenshots and photos of screens are sorted onto their own **Documents** tab (press Tab on the groups screen). Each is named — "Pier 39 Café receipt", "Form · I-797C notice" — from its text, read on your Mac. Copies of a document are matched by **what they say**, not just how they look, so two forms from the same template with different names are never treated as duplicates. The best copy is filed in **PGDocuments**; extra copies go to Duplicates. On that tab, `d` files a copy, `k` keeps it where it is, `x` marks it as a copy.
+
+### Descriptions and scene tags
+
+Photos in groups get a one-line description from Apple's on-device model ("Family posing on rocks by the ocean") and scene tags from Vision ("beach, rocks"), shown under each photo and in the enlarged view. Choose what runs each time from the home screen, or use `--no-documents` and `--no-describe`.
+
 ### Where moved photos go
 
-- **Apple Photos:** into a "PixelGraph Duplicates" album, and out of the album you scanned. They stay in your library until you delete them from that album.
-- **Folders and drives:** into a "PixelGraph Duplicates" folder inside the scanned folder, keeping the folder layout. RAW+JPEG pairs and `.xmp`/`.aae` sidecars move together.
+- **Apple Photos:** into a "PixelGraph Duplicates" album (documents: "PGDocuments"), and out of the album you scanned. They stay in your library until you delete them from that album.
+- **Folders and drives:** into a "PixelGraph Duplicates" (or "PGDocuments") folder inside the scanned folder, keeping the folder layout. RAW+JPEG pairs and `.xmp`/`.aae` sidecars move together.
 
 ### iCloud
 

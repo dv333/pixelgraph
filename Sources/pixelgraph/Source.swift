@@ -154,6 +154,7 @@ enum Items {
 /// Photos in folders: finding them, reading dates, thumbnails, and iCloud Drive.
 enum Files {
     static let duplicatesFolder = "PixelGraph Duplicates"
+    static let documentsFolder = "PGDocuments"
 
     static let imageExtensions: Set<String> = [
         "jpg", "jpeg", "heic", "heif", "png", "tif", "tiff", "webp",
@@ -182,7 +183,7 @@ enum Files {
 
         var byShot: [String: [URL]] = [:]
         for case let url as URL in walker {
-            if url.lastPathComponent == duplicatesFolder {
+            if url.lastPathComponent == duplicatesFolder || url.lastPathComponent == documentsFolder {
                 walker.skipDescendants()
                 continue
             }

@@ -21,7 +21,7 @@ enum Report {
 
         // Grid thumbnails come from the Mac's local previews; the large copies
         // may need iCloud, like the re-scoring step.
-        let ids = run.groups.flatMap { $0.photos.map(\.id) }
+        let ids = (run.groups + (run.documentGroups ?? [])).flatMap { $0.photos.map(\.id) }
         let fetch: Library.Fetch = offline ? .localOnly : .download(timeout: 60)
         var images: [String: Images] = [:]
         var done = 0
@@ -113,10 +113,17 @@ enum Report {
         var filters = #"<button class="on" data-f="all">All <b>\#(run.groups.count)</b></button>"#
         filters += #"<button data-f="moving">To move <b>\#(run.groups.filter { g in g.photos.contains { g.pick.willMove($0.id) } }.count)</b></button>"#
         if flagged > 0 { filters += #"<button data-f="flagged">Flagged <b>\#(flagged)</b></button>"# }
+        if let docs = run.documentGroups, !docs.isEmpty { filters += #"<button data-f="documents">Documents <b>\#(docs.count)</b></button>"# }
         if byModel > 0 { filters += #"<button data-f="model">Close calls <b>\#(byModel)</b></button>"# }
 
         var cards = ""
-        for (n, group) in run.groups.enumerated() {
+        let documents = run.documentGroups ?? []
+        let all = run.groups.enumerated().map { ($0.offset, $0.element, false) }
+            + documents.enumerated().map { ($0.offset, $0.element, true) }
+        for (n, group, isDocument) in all {
+            if isDocument, n == 0 {
+                cards += #"<h2 class="section" id="documents">Documents <span>\#(documents.reduce(0) { $0 + $1.photos.count }) photos · the best copy is filed in PGDocuments, other copies go to Duplicates</span></h2>"#
+            }
             let pick = group.pick
             let moving = group.photos.filter { pick.willMove($0.id) }.count
             let kept = group.photos.filter { pick.isKept($0.id) }.count
@@ -127,8 +134,21 @@ enum Report {
                 let files = images[id]
                 let img = files.map { #"<img loading="lazy" src="\#($0.thumb)" alt="">"# } ?? #"<div class="missing">No preview</div>"#
                 let mark: String
-                let caption: String
-                switch state {
+                var caption: String
+                switch isDocument ? "doc-" + state : state {
+                case "doc-best":
+                    mark = #"<span class="mark file">→ PGDocuments</span>"#
+                    caption = #"<p class="note file">\#(escape(photo.document ?? "Document"))</p>"#
+                case "doc-keep":
+                    mark = #"<span class="mark keep">Keep here</span>"#
+                    caption = #"<p class="note">\#(escape(photo.document ?? "Document"))</p>"#
+                case "doc-moved":
+                    mark = #"<span class="mark moved">Moved</span>"#
+                    caption = #"<p class="note muted">\#(escape(photo.document ?? "Document"))</p>"#
+                case "doc-move":
+                    mark = #"<span class="check" aria-label="Copy, moving to Duplicates">✓</span>"#
+                    let same = photo.sameText.map { " · same text \(Int(($0 * 100).rounded()))%" } ?? ""
+                    caption = #"<p class="note move">Copy → Duplicates\#(same)</p>"#
                 case "best":
                     mark = #"<span class="mark best">★ Best</span>"#
                     caption = #"<p class="note best">\#(escape(pick.notes[id] ?? ""))</p>"#
@@ -144,6 +164,13 @@ enum Report {
                     caption = why.map { #"<p class="note move">Move · <span class="why">\#(escape($0))</span></p>"# }
                         ?? #"<p class="note move">Move · \#(escape(pick.notes[id] ?? ""))</p>"#
                 }
+                if isDocument, let excerpt = photo.excerpt {
+                    caption += #"<p class="about">“\#(escape(excerpt))”</p>"#
+                } else if !isDocument {
+                    let about = [photo.summary, (photo.tags ?? []).isEmpty ? nil : (photo.tags ?? []).joined(separator: ", ")]
+                        .compactMap { $0 }.joined(separator: " · ")
+                    if !about.isEmpty { caption += #"<p class="about">\#(escape(about))</p>"# }
+                }
                 let faces = photo.faceCount > 0 ? " · faces \(Int(photo.faceQuality * 100))" : ""
                 tiles += """
                     <figure class="\(state)"\(files.map { #" data-full="\#($0.full)""# } ?? "")>
@@ -158,18 +185,25 @@ enum Report {
             var badges = ""
             if group.reviewed == true { badges += #"<span class="badge done">✓ Reviewed</span>"# }
             if pick.decidedBy == "apple-model" { badges += #"<span class="badge model">✦ Close call</span>"# }
+            let best = group.photos.first { $0.id == pick.best } ?? group.photos[0]
+            let heading = isDocument ? best.document ?? "Document" : day.string(from: group.photos[0].date)
+            let counts = isDocument
+                ? (pick.keepers.contains { !pick.moved.contains($0) } ? "<b>→ PGDocuments</b>" : "kept here")
+                    + (moving > 0 ? " · \(moving) cop\(moving == 1 ? "y" : "ies") → Duplicates" : "")
+                    + (pick.moved.isEmpty ? "" : " · \(pick.moved.count) moved")
+                : "keep \(kept) · <b>move \(moving)</b>" + (pick.moved.isEmpty ? "" : " · \(pick.moved.count) moved") + " · group \(n + 1)"
             cards += """
-                <section class="group" data-moving="\(moving > 0)" data-flagged="\(isFlagged)" data-model="\(pick.decidedBy == "apple-model")" data-title="\(escape(day.string(from: group.photos[0].date)))">
+                <section class="group" data-moving="\(moving > 0)" data-flagged="\(isFlagged)" data-model="\(pick.decidedBy == "apple-model")" data-doc="\(isDocument)" data-title="\(escape(heading))">
                   <header>
-                    <h2>\(escape(day.string(from: group.photos[0].date)))</h2>
-                    <span class="kind">\(group.kind.title)</span>\(badges)
-                    <span class="counts">keep \(kept) · <b>move \(moving)</b>\(pick.moved.isEmpty ? "" : " · \(pick.moved.count) moved") · group \(n + 1)</span>
+                    <h2>\(escape(heading))</h2>
+                    <span class="kind">\(isDocument ? day.string(from: group.photos[0].date) : group.kind.title)</span>\(badges)
+                    <span class="counts">\(counts)</span>
                   </header>
                   <div class="grid">\(tiles)</div>
                 </section>
                 """
         }
-        if run.groups.isEmpty {
+        if run.groups.isEmpty && documents.isEmpty {
             cards = #"<p class="empty">No near-identical photos found.</p>"#
         }
 
@@ -242,7 +276,7 @@ enum Report {
           $$('.filters button').forEach(x => x.classList.toggle('on', x === b));
           const f = b.dataset.f;
           $$('.group').forEach(g => {
-            g.hidden = !(f === 'all' || (f === 'moving' && g.dataset.moving === 'true') || (f === 'model' && g.dataset.model === 'true') || (f === 'flagged' && g.dataset.flagged === 'true'));
+            g.hidden = !(f === 'all' || (f === 'documents' && g.dataset.doc === 'true') || (f === 'moving' && g.dataset.moving === 'true') || (f === 'model' && g.dataset.model === 'true') || (f === 'flagged' && g.dataset.flagged === 'true'));
           });
         });
 
@@ -385,6 +419,11 @@ enum Report {
         .note.best { color: var(--best); }
         .note.move { color: var(--accent); }
         .note .why { color: var(--warn); }
+        .note.file { color: var(--accent); }
+        .about { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+        .mark.file { background: var(--accent-fill); color: #fff; }
+        .section { font-size: 22px; font-weight: 600; margin: 36px 0 14px; letter-spacing: -0.01em; }
+        .section span { font-size: 14px; font-weight: 400; color: var(--muted); margin-left: 8px; }
         .note.muted { color: var(--muted); }
         .meta { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
         .empty { color: var(--muted); text-align: center; padding: 64px 0; }
