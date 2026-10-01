@@ -130,7 +130,7 @@ final class App {
 
     private func loadMonths() {
         rows.append(.heading("ALL PHOTOS, BY MONTH"))
-        for month in Library.months(36) {
+        for month in Library.months() {
             rows.append(.month(.dates(from: month.start, to: month.end), count: month.count))
         }
     }

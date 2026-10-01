@@ -47,11 +47,16 @@ enum Library {
         return result.sorted { ($0.latest ?? .distantPast) > ($1.latest ?? .distantPast) }
     }
 
-    /// Photo counts for the last `months` months, newest first.
-    static func months(_ months: Int = 24) -> [(start: Date, end: Date, count: Int)] {
+    /// Photo counts for every month back to the oldest photo (or the last
+    /// `months` months), newest first. Empty months are left out.
+    static func months(_ months: Int? = nil) -> [(start: Date, end: Date, count: Int)] {
         let calendar = Calendar.current
         let thisMonth = calendar.dateInterval(of: .month, for: .now)!.start
-        return (0..<months).compactMap { back in
+        var count = months ?? 0
+        if months == nil, let oldest = oldestDate() {
+            count = (calendar.dateComponents([.month], from: calendar.dateInterval(of: .month, for: oldest)!.start, to: thisMonth).month ?? 0) + 1
+        }
+        return (0..<count).compactMap { back in
             guard let start = calendar.date(byAdding: .month, value: -back, to: thisMonth),
                   let end = calendar.date(byAdding: .month, value: 1, to: start) else { return nil }
             let count = assets(from: start, to: end).count
@@ -60,6 +65,16 @@ enum Library {
     }
 
     static func totalCount() -> Int { PHAsset.fetchAssets(with: imagesOnly()).count }
+
+    /// When the oldest photo was taken.
+    static func oldestDate() -> Date? {
+        let options = imagesOnly()
+        options.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            options.predicate!, NSPredicate(format: "creationDate != nil"),
+        ])
+        options.fetchLimit = 1
+        return PHAsset.fetchAssets(with: options).firstObject?.creationDate
+    }
 
     static func album(named name: String) -> PHAssetCollection? {
         var match: PHAssetCollection?
