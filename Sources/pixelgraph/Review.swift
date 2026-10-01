@@ -98,6 +98,7 @@ final class ReviewSession {
             // so don't redraw for it.
             if case .scroll = key, screen != .groups || sheet != nil { continue }
             if let outcome = await handle(key) { return outcome }
+            noteSeen()
             draw()
         }
     }
@@ -313,11 +314,44 @@ final class ReviewSession {
         select(index)
         order = Run.displayOrder(group)
         cursor = 0
-        if groups[groupIndex].reviewed != true {
-            groups[groupIndex].reviewed = true
-            dirty = true
-        }
+        seen = []
         screen = .group
+    }
+
+    // MARK: - Reviewed
+    //
+    // A group gets its ✓ once you've acted on it (kept, moved, changed the
+    // best, given a reason), once nothing in it is left to do, or once you've
+    // looked at every photo in it. Opening it alone doesn't count.
+
+    /// Photos in the open group you've had the highlight on.
+    private var seen: Set<String> = []
+
+    private func markReviewed(_ g: Int) {
+        guard groups.indices.contains(g), groups[g].reviewed != true else { return }
+        groups[g].reviewed = true
+        dirty = true
+        changed.insert(g)
+    }
+
+    /// Notes the photo under the highlight (and the pinned one in compare);
+    /// when every photo in the group has been looked at, it's reviewed.
+    private func noteSeen() {
+        guard screen != .groups, order.indices.contains(cursor) else { return }
+        seen.insert(order[cursor].id)
+        if screen == .compare, order.indices.contains(pinned) { seen.insert(order[pinned].id) }
+        if order.allSatisfy({ seen.contains($0.id) }) { markReviewed(groupIndex) }
+    }
+
+    /// Every group, on any tab, that a move took photos from.
+    private func markReviewed(containing ids: [String]) {
+        let set = Set(ids)
+        func mark(_ list: inout [Run.Group]) {
+            for g in list.indices where list[g].photos.contains(where: { set.contains($0.id) }) { list[g].reviewed = true }
+        }
+        mark(&run.groups)
+        if run.documentGroups != nil { mark(&run.documentGroups!) }
+        if run.junkGroups != nil { mark(&run.junkGroups!) }
     }
 
     // MARK: - Keep and move
@@ -334,6 +368,8 @@ final class ReviewSession {
 
     private func edit(_ index: Int? = nil, say message: String? = nil, _ change: (inout Pick) -> Void) {
         let g = index ?? groupIndex
+        // Acting on a group reviews it, even when the choice was already so.
+        markReviewed(g)
         let before = groups[g].pick
         change(&groups[g].pick)
         if let first = groups[g].pick.keepers.first { groups[g].pick.best = first }
@@ -486,6 +522,7 @@ final class ReviewSession {
                 done += 1
             }
             run.markMoved(file + duplicates)
+            markReviewed(containing: file + duplicates)
             let base = done
             let (captioned, captionError) = await writeCaptions(keepers, batch: batch) { n in
                 done = base + n
