@@ -909,8 +909,10 @@ final class ReviewSession {
         let g = groups[index]
         let (r, c) = mosaicOrigin(index, layout)
         let selected = index == groupIndex
+        // Blue while selected; green once reviewed; grey otherwise.
+        let done = g.reviewed == true
         var out = ui.box(row: r, col: c, width: layout.cardWidth, height: layout.imageRows + 2,
-                         paint: { [ui] in selected ? ui.blue($0) : ui.gray($0) }, heavy: selected)
+                         paint: { [ui] in selected ? ui.blue($0) : done ? ui.green($0) : ui.gray($0) }, heavy: selected)
         if content {
             let inner = layout.cardWidth - 2
             let coverWidth = inner * 2 / 3
@@ -992,7 +994,8 @@ final class ReviewSession {
             out += ui.at(r + 2, 3) + pad(ui.dim("\(g.photos.count) photos"), layout.labelWidth - 1)
         }
         let strip = layout.stacked ? r + 1 : r
-        for y in 0..<(strip - r + layout.thumbRows) { out += ui.at(r + y, 1) + (selected ? ui.blue("▌") : " ") }
+        let mark = selected ? ui.blue("▌") : g.reviewed == true ? ui.green("▌") : " "
+        for y in 0..<(strip - r + layout.thumbRows) { out += ui.at(r + y, 1) + mark }
         guard content else { return out }
 
         let shown = Run.displayOrder(g)
