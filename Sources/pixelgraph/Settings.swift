@@ -271,17 +271,21 @@ struct Settings: Sendable {
 // MARK: - The screen
 
 /// Settings: every setting, grouped, with what it does and its default.
-/// ← → change the highlighted one, enter types a value, d puts its default
-/// back. Changes are saved straight away.
+/// ← → change the highlighted one, enter types a value, d sets its default.
+/// Changes are a draft, marked as unsaved, until s saves them; leaving with
+/// unsaved changes asks first.
 final class SettingsScreen {
     private let ui: UI
     private var settings = Settings.load()
+    /// Changes not saved yet.
+    private var pending: [Settings.Key: String] = [:]
     private var selected = 0
     private var scroll = 0
     /// Text being typed for the highlighted setting.
     private var typing: String?
     private var toast: String?
-    private var confirmingReset = false
+    /// Esc with unsaved changes: "Save your changes?" is showing.
+    private var confirmingLeave = false
 
     private enum Line { case heading(String), setting(Setting) }
     private let lines: [Line] = {
@@ -323,23 +327,30 @@ final class SettingsScreen {
         return setting
     }
 
+    /// A setting's value as shown: the unsaved one if there is one.
+    private func value(_ key: Settings.Key) -> String { pending[key] ?? settings[key] }
+
     /// True to leave.
     private func handle(_ key: Terminal.Key) -> Bool {
         if key == .resize { return false }
         toast = nil
-        if confirmingReset {
-            confirmingReset = false
-            if key == .enter || key == .char("y") {
-                Database.open()?.resetSettings()
-                if Nightly.isOn { Nightly.remove() }
-                settings = Settings.load()
-                toast = ui.green("✓") + " Every setting is back to its default."
+        if confirmingLeave {
+            switch key {
+            case .enter, .char("s"), .char("y"):
+                save()
+                return true
+            case .char("d"), .char("n"):
+                return true
+            case .escape, .backspace, .click: confirmingLeave = false
+            default: break
             }
             return false
         }
         if typing != nil { typed(key); return false }
         switch key {
-        case .escape, .quit, .char("q"), .backspace: return true
+        case .escape, .quit, .char("q"), .backspace:
+            if pending.isEmpty { return true }
+            confirmingLeave = true
         case .up, .char("k"): move(-1)
         case .down, .char("j"): move(1)
         case .scroll(let ticks): if ticks != 0 { move(ticks > 0 ? 1 : -1) }
@@ -351,9 +362,20 @@ final class SettingsScreen {
             case .toggle, .choice: change(1)
             default: typing = ""
             }
+        case .char("s"):
+            if pending.isEmpty {
+                toast = ui.dim("Nothing to save.")
+            } else {
+                let count = pending.count
+                save()
+                if toast == nil { toast = ui.green("✓") + " Saved \(count) change\(count == 1 ? "" : "s")." }
+            }
         case .char("d"):
             if let setting = current { set(setting, setting.standard) }
-        case .char("D"): confirmingReset = true
+        case .char("D"):
+            for setting in Settings.all { set(setting, setting.standard) }
+            toast = pending.isEmpty ? ui.dim("Everything is already at its default.")
+                : ui.amber("Every setting set to its default · s to save, esc to drop")
         case .click(let row, _):
             let index = row - top + scroll
             if lines.indices.contains(index), case .setting = lines[index] { selected = index }
@@ -372,7 +394,7 @@ final class SettingsScreen {
 
     private func change(_ direction: Int) {
         guard let setting = current else { return }
-        set(setting, setting.step(settings[setting.key], by: direction))
+        set(setting, setting.step(value(setting.key), by: direction))
     }
 
     private func typed(_ key: Terminal.Key) {
@@ -394,28 +416,30 @@ final class SettingsScreen {
         typing = text
     }
 
+    /// Notes an unsaved change; back to the saved value drops it.
     private func set(_ setting: Setting, _ value: String) {
-        if setting.key == .nightly {
-            do {
-                if value == "on" {
-                    try Nightly.install(at: settings[.nightlyTime])
-                    toast = ui.green("✓") + " Runs every night at \(settings[.nightlyTime]). Log: nightly/auto.log"
-                } else {
-                    Nightly.remove()
-                    toast = ui.dim("The nightly clean-up is off.")
-                }
-            } catch {
-                toast = ui.red(error.localizedDescription)
+        pending[setting.key] = value == settings[setting.key] ? nil : value
+    }
+
+    /// Saves every unsaved change; the nightly job is set up or stopped here.
+    private func save() {
+        var problems: [String] = []
+        for (key, newValue) in pending where key != .nightly { Settings.save(key, newValue) }
+        if let nightly = pending[.nightly] {
+            if nightly == "on" {
+                do { try Nightly.install(at: value(.nightlyTime)) } catch { problems.append(error.localizedDescription) }
+            } else {
+                Nightly.remove()
             }
-        } else {
-            Settings.save(setting.key, value)
-            if setting.key == .theme { Theme.detect() }
+        } else if let time = pending[.nightlyTime], Nightly.isOn {
             // A new time for a nightly job that's on: set it up again.
-            if setting.key == .nightlyTime, Nightly.isOn {
-                do { try Nightly.install(at: value) } catch { toast = ui.red(error.localizedDescription) }
-            }
+            do { try Nightly.install(at: time) } catch { problems.append(error.localizedDescription) }
         }
+        let themeChanged = pending[.theme] != nil
+        pending = [:]
         settings = Settings.load()
+        if themeChanged { Theme.detect() }
+        if let problem = problems.first { toast = ui.red(problem) }
     }
 
     private func verb(_ setting: Setting) -> String {
@@ -438,18 +462,22 @@ final class SettingsScreen {
         if selected < scroll { scroll = selected }
         if selected >= scroll + visible { scroll = selected - visible + 1 }
         var out = ui.clear()
-        let changed = settings.changed
-        out += ui.at(2, left) + ui.clip(ui.bold("Settings") + ui.dim("  ·  " + (changed == 0 ? "all defaults" : "\(changed) changed from the default")), width)
+        let changed = Settings.Key.allCases.filter { value($0) != Settings.specs[$0]?.standard }.count
+        var heading = ui.dim("  ·  " + (changed == 0 ? "all defaults" : "\(changed) changed from the default"))
+        if !pending.isEmpty { heading += ui.amber("  ·  \(pending.count) unsaved") }
+        out += ui.at(2, left) + ui.clip(ui.bold("Settings") + heading, width)
         for (n, index) in lines.indices.dropFirst(scroll).prefix(visible).enumerated() {
             let row = top + n
             switch lines[index] {
             case .heading(let text): out += ui.at(row, left) + ui.dim(text)
             case .setting(let setting):
-                let isDefault = settings.isDefault(setting.key)
-                var value = setting.display(settings[setting.key])
-                if index == selected, typing != nil { value = (typing ?? "") + "▏" }
-                let shown = isDefault ? ui.dim(value) : ui.blue("● ") + value
-                let line = ui.spread("  " + setting.title, shown, width: width - 2)
+                let isDefault = value(setting.key) == setting.standard
+                var shown = setting.display(value(setting.key))
+                if index == selected, typing != nil { shown = (typing ?? "") + "▏" }
+                // Unsaved: amber with a star; changed from the default: a blue dot.
+                let styled = pending[setting.key] != nil ? ui.amber("* " + shown)
+                    : isDefault ? ui.dim(shown) : ui.blue("● ") + shown
+                let line = ui.spread("  " + setting.title, styled, width: width - 2)
                 out += index == selected
                     ? ui.at(row, left - 2) + ui.bar() + ui.highlight(" " + line, width: width)
                     : ui.at(row, left) + line
@@ -460,22 +488,27 @@ final class SettingsScreen {
             for (n, text) in ui.wrap(setting.help, width: width - 2, lines: 2).enumerated() {
                 out += ui.at(helpTop + n, left) + ui.dim(text)
             }
-            let standard = settings.isDefault(setting.key) ? "default" : "default: \(setting.display(setting.standard)) · d puts it back"
-            out += ui.at(helpTop + 2, left) + ui.dim(standard)
+            var note = value(setting.key) == setting.standard ? "default" : "default: \(setting.display(setting.standard)) · d sets it"
+            if pending[setting.key] != nil { note += " · saved: \(setting.display(settings[setting.key]))" }
+            out += ui.at(helpTop + 2, left) + ui.dim(note)
         }
         if let toast { out += ui.at(ui.rows - 1, left) + ui.clip(toast, width) }
         let hints: String
         if typing != nil {
-            hints = "type a value · enter save · esc cancel"
+            hints = "type a value · enter set · esc cancel"
         } else {
             hints = "↑↓ choose · ←→ change · enter \(current.map(verb) ?? "change") · d default · D all defaults · esc back"
         }
-        out += ui.barLine(ui.rows, String(repeating: " ", count: max(0, left - 3)) + ui.dim(ui.clip(hints, width)))
-        if confirmingReset {
+        let action = pending.isEmpty || typing != nil ? "" : ui.button("s Save \(pending.count) change\(pending.count == 1 ? "" : "s")")
+        let room = width - ui.visibleWidth(action) - 2
+        out += ui.barLine(ui.rows, String(repeating: " ", count: max(0, left - 3))
+            + ui.spread(ui.dim(ui.clip(hints, max(0, room))), action, width: width))
+        if confirmingLeave {
             let w = min(ui.cols - 2, 60) - 4
-            out += ui.sheet([ui.bold("Put every setting back to its default?"), ""]
-                + ui.wrap("This also stops the nightly clean-up. Your scans, pins and progress stay.", width: w, lines: 2).map { ui.dim($0) }
-                + ["", ui.spread("", ui.dim("esc Keep   ") + ui.button("enter Reset"), width: w)], width: 64)
+            let names = pending.keys.compactMap { Settings.specs[$0]?.title }.sorted().joined(separator: ", ")
+            out += ui.sheet([ui.bold("Save your changes?"), ""]
+                + ui.wrap("\(pending.count) unsaved: \(names).", width: w, lines: 3).map { ui.dim($0) }
+                + ["", ui.spread("", ui.dim("esc Keep editing   d Discard   ") + ui.button("enter Save"), width: w)], width: 64)
         }
         ui.term.write(out)
     }

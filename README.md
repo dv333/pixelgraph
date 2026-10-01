@@ -213,7 +213,7 @@ Scan in parts — an album, a month, a folder. Results are cached, so rescans ar
 
 ### Settings
 
-Press `,` on the home screen (or run `pixelgraph settings`) to change how PixelGraph works. ↑↓ choose, ←→ change, Enter types a value, `d` puts one back to its default, `D` (shift-d) resets everything. A blue ● marks what you've changed. `pixelgraph settings --list` prints them all.
+Press `,` on the home screen (or run `pixelgraph settings`) to change how PixelGraph works. ↑↓ choose, ←→ change, Enter types a value, `d` sets one back to its default, `D` (shift-d) sets them all. Changes show in amber with a * until you press `s` to save; leaving with unsaved changes asks whether to save or discard them. A blue ● marks what differs from the default. `pixelgraph settings --list` prints them all.
 
 | Section | Setting | Default |
 |---|---|---|
