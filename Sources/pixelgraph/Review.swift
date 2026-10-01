@@ -446,6 +446,10 @@ final class ReviewSession {
         var done = 0
         func step(_ detail: String) { showProgress(done: done, total: total, detail: detail) }
         defer { needsFull = true }
+        // Take the confirm sheet off the screen first: the progress panel is
+        // smaller and would leave the sheet's edges showing around it.
+        needsFull = true
+        draw()
         do {
             let batch = UUID()
             var records: [Mover.Record] = []
