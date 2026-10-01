@@ -233,6 +233,7 @@ Press `,` on the home screen (or run `pixelgraph settings`) to change how PixelG
 | Moving | Enter in the move sheet | PGDuplicates (or Delete) |
 | | Describe kept photos | On |
 | Display | Photos | auto (iterm, blocks) |
+| | Theme | auto (light, dark) |
 | | Opening title | On |
 | Nightly clean-up | Run every night · At | Off · 02:00 |
 | | Photos from the last · Move at most | 30 days · 300 |

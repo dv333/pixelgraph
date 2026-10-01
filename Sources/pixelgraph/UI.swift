@@ -56,14 +56,33 @@ final class UI: @unchecked Sendable {
     func gray(_ s: String) -> String { Theme.fg(Theme.line) + s + "\u{1B}[39m" }
 
     /// A filled button, like the one primary action on a screen.
-    func button(_ s: String) -> String { Theme.bg(Theme.accent) + "\u{1B}[38;2;255;255;255m \(plain(s)) \u{1B}[0m" }
+    func button(_ s: String) -> String { Theme.bg(Theme.accent) + Theme.fg(Theme.onAccent) + " \(plain(s)) \u{1B}[0m" }
 
-    /// The selected row in a list: white text on a solid blue bar, so it reads
-    /// the same on light and dark terminals.
+    /// The accent bar that marks the selected row, sheets and the bottom bar.
+    func bar() -> String { Theme.fg(Theme.accent) + "▌" + "\u{1B}[39m" }
+
+    /// Styled text kept on a background: every reset puts it back.
+    func on(_ background: Theme.RGB, _ styled: String) -> String {
+        let restore = Theme.bg(background) + Theme.fg(Theme.panelText)
+        return styled.replacingOccurrences(of: "\u{1B}[0m", with: "\u{1B}[0m" + restore)
+            .replacingOccurrences(of: "\u{1B}[39m", with: "\u{1B}[39m" + Theme.fg(Theme.panelText))
+    }
+
+    /// The selected row in a list, on a soft grey; draw `bar()` just left of it.
     func highlight(_ s: String, width: Int) -> String {
-        let text = plain(s)
-        return Theme.bg(Theme.accent) + "\u{1B}[38;2;255;255;255m" + text
-            + String(repeating: " ", count: max(0, width - text.count)) + "\u{1B}[0m"
+        let text = on(Theme.selection, clip(s, width))
+        return Theme.bg(Theme.selection) + Theme.fg(Theme.panelText) + text
+            + String(repeating: " ", count: max(0, width - visibleWidth(text))) + "\u{1B}[0m"
+    }
+
+    /// A full-width line on the panel grey with the accent bar on the left,
+    /// like OpenCode's input box. `content` starts at column 3.
+    func barLine(_ row: Int, _ content: String) -> String {
+        // The last column stays empty, so the bottom row can't scroll the screen.
+        let width = max(4, cols - 1)
+        let body = on(Theme.panel, clip(content, width - 2))
+        return at(row, 1) + "\u{1B}[2K" + Theme.bg(Theme.panel) + bar() + Theme.fg(Theme.panelText) + " " + body
+            + String(repeating: " ", count: max(0, width - 2 - visibleWidth(body))) + "\u{1B}[0m"
     }
 
     /// Text without colour or weight codes.
@@ -153,7 +172,7 @@ final class UI: @unchecked Sendable {
         let width = cols - 2
         let room = width - visibleWidth(action) - 2
         let left = visibleWidth(hints) <= room ? hints : short
-        return at(rows, 2) + "\u{1B}[2K" + spread(dim(clip(left, max(0, room))), action, width: width)
+        return barLine(rows, spread(dim(clip(left, max(0, room))), action, width: width - 1))
     }
 
     /// A centred panel over the current screen, for confirmations and choices.
@@ -163,10 +182,8 @@ final class UI: @unchecked Sendable {
         let top = max(2, (rows - lines.count) / 2), left = (cols - width) / 2 + 1
         var out = ""
         for (y, text) in ([""] + lines + [""]).enumerated() {
-            let body = clip(text, width - 4).replacingOccurrences(of: "\u{1B}[0m", with: "\u{1B}[0m" + panel)
-                .replacingOccurrences(of: "\u{1B}[22m", with: "\u{1B}[22m" + panel)
-                .replacingOccurrences(of: "\u{1B}[39m", with: "\u{1B}[39m" + panel)
-            out += at(top + y, left) + panel + "  " + body
+            let body = on(Theme.panel, clip(text, width - 4))
+            out += at(top + y, left) + panel + bar() + Theme.fg(Theme.panelText) + " " + body
                 + String(repeating: " ", count: max(0, width - 2 - visibleWidth(body))) + "\u{1B}[0m"
         }
         return out

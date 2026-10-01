@@ -653,7 +653,7 @@ final class App {
         guard r >= listTop, r < ui.rows - 2 else { return "" }
         let line = render(rows[index], width: columnWidth - 2)
         if index == selected {
-            return ui.at(r, 1) + "\u{1B}[2K" + ui.at(r, left - 2) + ui.blue("›") + " " + ui.highlight(line, width: columnWidth - 1)
+            return ui.at(r, 1) + "\u{1B}[2K" + ui.at(r, left - 2) + ui.bar() + ui.highlight(" " + line, width: columnWidth)
         }
         return ui.at(r, 1) + "\u{1B}[2K" + ui.at(r, left) + line
     }
@@ -690,8 +690,9 @@ final class App {
         }
         let room = columnWidth - ui.visibleWidth(action) - 2
         let text = ui.visibleWidth(hints) <= room ? hints : short
-        return ui.at(ui.rows, 1) + "\u{1B}[2K" + ui.at(ui.rows, left)
-            + ui.spread(ui.dim(ui.clip(text, max(0, room))), action, width: columnWidth)
+        // The bar runs the full width; its text lines up with the column above.
+        return ui.barLine(ui.rows, String(repeating: " ", count: max(0, left - 3))
+            + ui.spread(ui.dim(ui.clip(text, max(0, room))), action, width: columnWidth))
     }
 
     /// "✓ reviewed · 12 Sep" for the latest of these places' progress, or "".

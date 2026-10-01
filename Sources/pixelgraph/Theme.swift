@@ -1,10 +1,10 @@
 import Darwin
 import Foundation
 
-/// Colours that stay readable on both light and dark terminals. Dark
-/// backgrounds get the bright system colours; light backgrounds get darker
-/// ones, and selection is always white text on a solid blue bar (like a
-/// selected row in Finder), at a contrast that passes WCAG AA either way.
+/// Colours that stay readable on both light and dark terminals, in the
+/// style of OpenCode: a purple accent on light backgrounds and a blue one on
+/// dark, soft grey panels, and a thin accent bar on the left of the selected
+/// row, sheets and the bottom bar.
 enum Theme {
     nonisolated(unsafe) static var light = false
 
@@ -13,25 +13,30 @@ enum Theme {
     static var green: RGB { light ? (26, 127, 55) : (48, 209, 88) }
     static var red: RGB { light ? (200, 30, 30) : (255, 105, 97) }
     static var amber: RGB { light ? (168, 82, 0) : (255, 179, 64) }
-    static var blue: RGB { light ? (0, 88, 208) : (100, 168, 255) }
+    /// The accent: keys, the cursor, bars and buttons.
+    static var accent: RGB { light ? (124, 88, 200) : (92, 156, 245) }
+    static var blue: RGB { accent }
     /// Frames and quiet lines.
-    static var line: RGB { light ? (174, 174, 180) : (99, 99, 102) }
+    static var line: RGB { light ? (196, 196, 200) : (72, 72, 76) }
     /// The empty part of a progress bar.
-    static var track: RGB { light ? (214, 214, 220) : (58, 58, 62) }
-    /// Sheets drawn over the screen.
-    static var panel: RGB { light ? (236, 236, 240) : (36, 36, 40) }
-    static var panelText: RGB { light ? (29, 29, 31) : (235, 235, 240) }
-    /// Selected rows and buttons: white on this blue is 5.6:1.
-    static let accent: RGB = (0, 96, 223)
+    static var track: RGB { light ? (226, 226, 230) : (48, 48, 52) }
+    /// Sheets and the bottom bar.
+    static var panel: RGB { light ? (243, 243, 243) : (30, 30, 30) }
+    static var panelText: RGB { light ? (26, 26, 26) : (238, 238, 238) }
+    /// The selected row.
+    static var selection: RGB { light ? (234, 234, 236) : (42, 42, 44) }
+    /// Text on the accent: white on purple, near-black on blue (both above 5:1).
+    static var onAccent: RGB { light ? (255, 255, 255) : (12, 12, 12) }
 
     static func fg(_ c: RGB) -> String { "\u{1B}[38;2;\(c.r);\(c.g);\(c.b)m" }
     static func bg(_ c: RGB) -> String { "\u{1B}[48;2;\(c.r);\(c.g);\(c.b)m" }
 
     /// Works out whether the terminal is light or dark: PIXELGRAPH_THEME if
-    /// set, else ask the terminal for its background colour, else COLORFGBG.
+    /// set, else Settings → Theme, else ask the terminal for its background
+    /// colour, else COLORFGBG.
     static func detect() {
         let env = ProcessInfo.processInfo.environment
-        switch env["PIXELGRAPH_THEME"]?.lowercased() {
+        switch env["PIXELGRAPH_THEME"]?.lowercased() ?? Settings.load()[.theme] {
         case "light": light = true; return
         case "dark": light = false; return
         default: break

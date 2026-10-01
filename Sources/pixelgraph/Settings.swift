@@ -78,7 +78,7 @@ struct Settings: Sendable {
         case findExposure = "junk.find.exposure", findSmudged = "junk.find.smudged", findScreenshots = "junk.find.screenshots"
         case findForwarded = "junk.find.forwarded", findLowQuality = "junk.find.low-quality"
         case moveDefault = "move.default", moveDescribe = "move.describe"
-        case graphics = "display.graphics", intro = "display.intro"
+        case graphics = "display.graphics", intro = "display.intro", theme = "display.theme"
         case nightly = "nightly.on", nightlyTime = "nightly.time", nightlyDays = "nightly.days"
         case nightlyLimit = "nightly.limit", assistant = "nightly.assistant", emptyDays = "nightly.empty-days"
         case judgeModel = "ai.model", judgeConfidence = "ai.confidence", ollamaHost = "ai.host"
@@ -157,6 +157,9 @@ struct Settings: Sendable {
         Setting(key: .graphics, section: "Display", title: "Photos",
                 help: "auto: sharp photos in iTerm2, colour blocks elsewhere. iterm forces sharp; blocks works in any true-colour terminal.",
                 kind: .choice(["auto", "iterm", "blocks"]), standard: "auto"),
+        Setting(key: .theme, section: "Display", title: "Theme",
+                help: "auto follows your terminal's background; light or dark picks one. PIXELGRAPH_THEME still wins when set.",
+                kind: .choice(["auto", "light", "dark"]), standard: "auto"),
         Setting(key: .intro, section: "Display", title: "Opening title",
                 help: "The rack-focus title when PixelGraph starts (in terminals that can show images).",
                 kind: .toggle, standard: "on"),
@@ -406,6 +409,7 @@ final class SettingsScreen {
             }
         } else {
             Settings.save(setting.key, value)
+            if setting.key == .theme { Theme.detect() }
             // A new time for a nightly job that's on: set it up again.
             if setting.key == .nightlyTime, Nightly.isOn {
                 do { try Nightly.install(at: value) } catch { toast = ui.red(error.localizedDescription) }
@@ -447,7 +451,7 @@ final class SettingsScreen {
                 let shown = isDefault ? ui.dim(value) : ui.blue("● ") + value
                 let line = ui.spread("  " + setting.title, shown, width: width - 2)
                 out += index == selected
-                    ? ui.at(row, left - 2) + ui.blue("›") + " " + ui.highlight(line, width: width - 1)
+                    ? ui.at(row, left - 2) + ui.bar() + ui.highlight(" " + line, width: width)
                     : ui.at(row, left) + line
             }
         }
@@ -466,7 +470,7 @@ final class SettingsScreen {
         } else {
             hints = "↑↓ choose · ←→ change · enter \(current.map(verb) ?? "change") · d default · D all defaults · esc back"
         }
-        out += ui.at(ui.rows, 1) + "\u{1B}[2K" + ui.at(ui.rows, left) + ui.dim(ui.clip(hints, width))
+        out += ui.barLine(ui.rows, String(repeating: " ", count: max(0, left - 3)) + ui.dim(ui.clip(hints, width)))
         if confirmingReset {
             let w = min(ui.cols - 2, 60) - 4
             out += ui.sheet([ui.bold("Put every setting back to its default?"), ""]
