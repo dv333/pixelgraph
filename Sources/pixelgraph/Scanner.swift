@@ -14,6 +14,8 @@ struct Scanner {
         var describe = true
         /// Gather photos that look like rejects on their own into the Junk tab.
         var junk = true
+        /// Screenshots older than this many days count as junk.
+        var screenshotDays = 30
         /// Where the scan and its previews are saved: the usual place, or
         /// the nightly run's own folder so it never overwrites a review in progress.
         var runFile = Paths.lastRun
@@ -25,7 +27,7 @@ struct Scanner {
     let board: ProgressBoard
 
     static let stages = ["Read photos", "Fingerprint", "Find documents", "Group lookalikes", "Score grouped photos",
-                         "Check eyes and faces", "Tag scenes", "Pick the best shots", "Prepare previews"]
+                         "Check eyes and faces", "Tag scenes", "Pick the best shots", "Look for junk", "Prepare previews"]
 
     init(source: Source, options: Options, fullScreen: Bool = false, quiet: Bool = false) {
         self.source = source
@@ -110,22 +112,31 @@ struct Scanner {
 
         var run = Run(date: .now, scope: source.description, scanned: photos.count, rules: options.rules, groups: groups)
         run.source = source
-        if options.junk {
-            let grouped = Set(groupedNow.flatMap { $0.map(\.id) })
-            run.junkGroups = Self.junkGroups(others.filter { !grouped.contains($0.id) }, among: photos)
-        }
         if options.documents {
             run.documentGroups = documentGroups
         } else {
             // Not sorting documents: copies of the same document are still duplicates.
             run.groups += documentGroups.filter { $0.photos.count > 1 }
         }
+        if options.junk {
+            // Photos with no lookalike: the ungrouped ones, and screenshots with no copies.
+            let grouped = Set(groupedNow.flatMap { $0.map(\.id) })
+            let loneScreenshots = Set(copiesNow.filter { $0.count == 1 && $0[0].isScreenshot }.map { $0[0].id })
+            let singles = others.filter { !grouped.contains($0.id) } + docPhotos.filter { loneScreenshots.contains($0.id) }
+            let junk = try await findJunk(singles, among: photos, lookup, useModel: useModel)
+            run.junkGroups = junk
+            // An old screenshot belongs in Junk, not in Documents as well.
+            let junkIDs = Set(junk.flatMap { $0.photos.map(\.id) })
+            run.documentGroups = run.documentGroups?.filter { !($0.photos.count == 1 && junkIDs.contains($0.photos[0].id)) }
+        } else {
+            board.skip(8, detail: "off")
+        }
         try run.save(to: options.runFile)
 
         let previewCount = run.allGroups.reduce(0) { $0 + $1.photos.count }
-        board.start(8, total: previewCount)
-        try await Report.write(run, items: lookup, offline: options.offline, in: options.reportFolder) { done, _ in board.advance(8, done: done) }
-        board.finish(8, detail: "ready to review")
+        board.start(9, total: previewCount)
+        try await Report.write(run, items: lookup, offline: options.offline, in: options.reportFolder) { done, _ in board.advance(9, done: done) }
+        board.finish(9, detail: "ready to review")
         board.setSummary(summary(groups: groups.count, moving: run.toMove.count, problems: problems.count,
                                  documents: run.documentGroups.map { $0.reduce(0) { $0 + $1.photos.count } } ?? 0))
         board.end()
@@ -133,12 +144,52 @@ struct Scanner {
         return run
     }
 
-    /// Photos with no lookalike that still look like rejects, in groups of up
-    /// to 24 by reason, everything selected to move.
-    static func junkGroups(_ singles: [Photo], among all: [Photo]) -> [Run.Group] {
-        let reasons = Inspector.rejects(singles, among: all)
-        let byReason = Dictionary(grouping: singles.filter { reasons[$0.id] != nil }) { reasons[$0.id]! }
-        return Inspector.reasons.compactMap { byReason[$0] }.flatMap { photos in
+    /// Photos with no lookalike that look like junk (see `Junk`). The extra
+    /// Vision checks run only on photos that already look weak, and are
+    /// cached; Apple's model settles the ones that aren't clear-cut.
+    private func findJunk(_ singles: [Photo], among all: [Photo], _ lookup: [String: Item], useModel: Bool) async throws -> [Run.Group] {
+        let context = Junk.context(all, screenshotDays: options.screenshotDays)
+        let strong = Inspector.rejects(singles, among: all)
+        let look = singles.filter { strong[$0.id] == nil && Junk.worthALook($0, context) }
+        let store = try Store()
+        board.start(8, total: look.count)
+        var signals: [String: Junk.Signals] = [:]
+        for (n, photo) in look.enumerated() {
+            guard let item = lookup[photo.id] else { continue }
+            if let cached = store.extra(Junk.Signals.self, id: photo.id, field: "junk", modified: item.modified, version: Junk.version) {
+                signals[photo.id] = cached
+            } else if let image = await item.image(maxSide: 512, fetch: .localOnly) {
+                let measured = await Junk.measure(image)
+                signals[photo.id] = measured
+                try store.saveExtra(measured, id: photo.id, field: "junk", modified: item.modified, version: Junk.version)
+            }
+            board.advance(8, done: n + 1)
+        }
+        var reasons: [String: String] = [:]
+        var unsure: [Photo] = []
+        for photo in singles {
+            let origin = lookup[photo.id].map(Junk.origin) ?? ""
+            guard let verdict = Junk.judge(photo, origin: origin, signals: signals[photo.id], strong: strong[photo.id], context) else { continue }
+            reasons[photo.id] = verdict.reason
+            if !verdict.sure { unsure.append(photo) }
+        }
+        // Two weaker signs agreeing isn't proof: Apple's model has the last word.
+        var spared = 0
+        if useModel {
+            for photo in unsure.prefix(400) {
+                guard let image = await lookup[photo.id]?.image(maxSide: 512, fetch: .localOnly) else { continue }
+                if await Junk.worthKeeping(image) == true { reasons[photo.id] = nil; spared += 1 }
+            }
+        }
+        board.finish(8, detail: reasons.isEmpty ? "nothing obvious" : "\(reasons.count) look like junk" + (spared > 0 ? ", \(spared) spared by Apple Intelligence" : ""))
+        return Self.junkGroups(singles.filter { reasons[$0.id] != nil }, reasons: reasons)
+    }
+
+    /// Junk in groups of up to 24 by reason, everything selected to move.
+    static func junkGroups(_ photos: [Photo], reasons: [String: String]) -> [Run.Group] {
+        let byReason = Dictionary(grouping: photos.filter { reasons[$0.id] != nil }) { reasons[$0.id]! }
+        let ordered = Junk.order.filter { byReason[$0] != nil } + byReason.keys.filter { !Junk.order.contains($0) }.sorted()
+        return ordered.compactMap { byReason[$0] }.flatMap { photos in
             stride(from: 0, to: photos.count, by: 24).map { start in
                 let members = Array(photos.sorted { $0.date < $1.date }[start ..< min(start + 24, photos.count)])
                 let ids = members.map(\.id)

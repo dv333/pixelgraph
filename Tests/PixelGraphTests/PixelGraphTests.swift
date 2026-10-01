@@ -460,3 +460,27 @@ private func member(_ id: String, sharpness: Float = 0.01, aesthetic: Float = 0)
     // Deleting is off, so "trash" isn't offered.
     #expect(!String(decoding: list, as: UTF8.self).contains("\"trash\""))
 }
+
+@Test func junkNeedsOneStrongSignOrTwoThatAgree() {
+    let context = Junk.context([], screenshotDays: 30, now: t0.addingTimeInterval(86_400 * 40))
+    let plain = Junk.Signals(labels: ["dog"], subject: 0.3, tilt: nil)
+
+    // An old screenshot is junk; a recent one isn't.
+    #expect(Junk.judge(photo("old", 0, at: 0, screenshot: true), origin: "", signals: nil, strong: nil, context)?.reason == "old screenshot")
+    #expect(Junk.judge(photo("new", 0, at: 86_400 * 35, screenshot: true), origin: "", signals: nil, strong: nil, context) == nil)
+
+    // One weak sign (a poor rating) isn't enough; add a crooked horizon and it is, pending a second opinion.
+    let dull = photo("dull", 0, aesthetic: -0.5)
+    #expect(Junk.judge(dull, origin: "img_1.heic", signals: plain, strong: nil, context) == nil)
+    let crooked = Junk.judge(dull, origin: "img_1.heic", signals: Junk.Signals(labels: ["dog"], subject: 0.3, tilt: 14), strong: nil, context)
+    #expect(crooked?.reason == "crooked" && crooked?.sure == false)
+
+    // Pointing at the floor with nothing in frame, and a poor rating: an accidental shot.
+    #expect(Junk.judge(dull, origin: "", signals: Junk.Signals(labels: ["floor"], subject: 0, tilt: nil), strong: nil, context)?.reason == "accidental shot")
+
+    // A small image named by WhatsApp is a forward on its own.
+    let small = Photo(id: "wa", date: t0, isScreenshot: false, width: 1280, height: 960, analysis: photo("x", 0).analysis)
+    #expect(Junk.judge(small, origin: "img-20240101-wa0003.jpg", signals: nil, strong: nil, context)?.reason == "forwarded image")
+    // Having no face is never a sign by itself.
+    #expect(Junk.judge(photo("landscape", 0), origin: "img_2.heic", signals: plain, strong: nil, context) == nil)
+}

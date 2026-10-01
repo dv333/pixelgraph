@@ -42,13 +42,17 @@ struct ScanOptions: ParsableArguments {
     @Flag(help: "Don't tag scenes (beach, dog…) in the photos in groups.")
     var noDescribe = false
 
-    @Flag(help: "Don't look for blurry, dark or smudged photos with no lookalike (the Junk tab).")
+    @Flag(help: "Don't look for junk with no lookalike: accidental, blurry or crooked shots, old screenshots, forwards (the Junk tab).")
     var noJunk = false
+
+    @Option(help: "Screenshots older than this many days count as junk.")
+    var screenshotDays = 30
 
     var scanner: Scanner.Options {
         Scanner.Options(
             rules: GroupingRules(momentThreshold: momentThreshold, momentWindow: momentWindow, sceneThreshold: sceneThreshold),
-            useModel: !noModel, offline: offline, documents: !noDocuments, describe: !noDescribe, junk: !noJunk)
+            useModel: !noModel, offline: offline, documents: !noDocuments, describe: !noDescribe, junk: !noJunk,
+            screenshotDays: screenshotDays)
     }
 }
 
