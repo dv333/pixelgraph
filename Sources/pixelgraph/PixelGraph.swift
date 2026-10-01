@@ -59,11 +59,14 @@ struct Home: AsyncParsableCommand {
 
     @OptionGroup var options: ScanOptions
 
+    @Flag(help: "Skip the opening title (also PIXELGRAPH_NO_INTRO=1).")
+    var noIntro = false
+
     func run() async throws {
         guard isatty(STDIN_FILENO) != 0, isatty(STDOUT_FILENO) != 0 else {
             throw ValidationError("Run pixelgraph in a terminal, or use `pixelgraph scan --album/--folder`.")
         }
-        try await App(options: options.scanner).run()
+        try await App(options: options.scanner, intro: !noIntro).run()
     }
 }
 

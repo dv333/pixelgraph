@@ -28,6 +28,25 @@ final class Terminal: @unchecked Sendable {
         return (Double(ws.ws_xpixel) / Double(ws.ws_col)) / (Double(ws.ws_ypixel) / Double(ws.ws_row))
     }
 
+    /// The window's size in pixels, or zeros when the terminal doesn't say.
+    var pixelSize: (width: Int, height: Int) {
+        var ws = winsize()
+        guard ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 else { return (0, 0) }
+        return (Int(ws.ws_xpixel), Int(ws.ws_ypixel))
+    }
+
+    /// True when a key was pressed; what's waiting is read and dropped.
+    func keyWaiting() -> Bool {
+        guard wait(0) else { return false }
+        drainInput()
+        return true
+    }
+
+    /// Drops any keys waiting to be read.
+    func drainInput() {
+        while wait(0), readByte() != nil {}
+    }
+
     var size: (cols: Int, rows: Int) {
         var ws = winsize()
         guard ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0, ws.ws_col > 0 else { return (80, 24) }

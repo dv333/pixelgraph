@@ -32,9 +32,11 @@ final class App {
     private var prompt: String?
     private var message: String?
     private var photosAllowed = false
+    private let intro: Bool
 
-    init(options: Scanner.Options) {
+    init(options: Scanner.Options, intro: Bool = true) {
         self.options = options
+        self.intro = intro
     }
 
     func run() async throws {
@@ -43,6 +45,7 @@ final class App {
         photosAllowed = (try? await Library.requestAccess()) != nil
         ui.enter()
         defer { ui.leave() }
+        if intro { await Intro.play(on: ui.term) }
         load()
         draw()
         while true {
@@ -173,7 +176,7 @@ final class App {
         case .enter, .right, .char(" "): return activate(rows[selected], opening: key == .right)
         case .left, .escape, .backspace: back()
         case .click(let row, _):
-            let index = row - 4 + scroll
+            let index = row - listTop + scroll
             if rows.indices.contains(index), isSelectable(rows[index]) {
                 selected = index
                 return activate(rows[index], opening: false)
@@ -307,7 +310,12 @@ final class App {
     /// What the last full frame showed, apart from the selection.
     private var drawnFrame: String?
     private var drawnSelected = -1
-    private let listTop = 4
+
+    /// The screen is a centred column, sitting a third of the way down when
+    /// the list is short; long lists start near the top and scroll.
+    private var columnWidth: Int { max(20, min(ui.cols - 4, 88)) }
+    private var left: Int { max(3, (ui.cols - columnWidth) / 2 + 1) }
+    private var listTop: Int { max(4, (ui.rows - 3 - (rows.count + 2)) / 3 + 2) }
 
     /// Moving the selection repaints just the two rows involved and the
     /// action bar; anything else repaints the screen.
@@ -328,9 +336,9 @@ final class App {
             case .months: title = ui.bold("Photos library") + ui.dim("  ·  choose a month")
             case .browser(let url): title = ui.bold(url.lastPathComponent) + ui.dim("  ·  " + url.deletingLastPathComponent().path)
             }
-            out += ui.at(2, 3) + ui.clip(title, ui.cols - 4)
+            out += ui.at(listTop - 2, left) + ui.clip(title, columnWidth)
             for index in rows.indices.dropFirst(scroll).prefix(visible) { out += rowLine(index) }
-            if let message { out += ui.at(ui.rows - 2, 3) + ui.clip(message, ui.cols - 4) }
+            if let message { out += ui.at(ui.rows - 2, left) + ui.clip(message, columnWidth) }
             if let source = choosing {
                 func task(_ index: Int?, _ on: Bool, _ name: String, _ detail: String) -> String {
                     let box = on ? ui.green("[✓]") : "[ ]"
@@ -370,11 +378,11 @@ final class App {
         guard rows.indices.contains(index) else { return "" }
         let r = listTop + index - scroll
         guard r >= listTop, r < ui.rows - 2 else { return "" }
-        let line = render(rows[index], width: ui.cols - 6)
+        let line = render(rows[index], width: columnWidth - 2)
         if index == selected {
-            return ui.at(r, 1) + "\u{1B}[2K" + ui.at(r, 2) + ui.blue("›") + " " + ui.highlight(line, width: ui.cols - 5)
+            return ui.at(r, 1) + "\u{1B}[2K" + ui.at(r, left - 2) + ui.blue("›") + " " + ui.highlight(line, width: columnWidth - 1)
         }
-        return ui.at(r, 1) + "\u{1B}[2K" + ui.at(r, 4) + line
+        return ui.at(r, 1) + "\u{1B}[2K" + ui.at(r, left) + line
     }
 
     private func actionBar() -> String {
@@ -388,8 +396,13 @@ final class App {
         let backHint = screen == .home ? "" : " · ← back"
         let scanHint: String
         if case .browser = screen { scanHint = " · s scan this folder" } else { scanHint = "" }
-        return ui.actionBar(hints: "↑↓ choose · enter \(screen == .home ? "scan" : "open")\(scanHint)\(backHint) · q quit",
-                            short: "↑↓ · enter\(backHint) · q", action: action)
+        // The bar lines up with the column above it.
+        let hints = "↑↓ choose · enter \(screen == .home ? "scan" : "open")\(scanHint)\(backHint) · q quit"
+        let short = "↑↓ · enter\(backHint) · q"
+        let room = columnWidth - ui.visibleWidth(action) - 2
+        let text = ui.visibleWidth(hints) <= room ? hints : short
+        return ui.at(ui.rows, 1) + "\u{1B}[2K" + ui.at(ui.rows, left)
+            + ui.spread(ui.dim(ui.clip(text, max(0, room))), action, width: columnWidth)
     }
 
     private func render(_ row: Row, width: Int) -> String {
