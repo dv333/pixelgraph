@@ -88,6 +88,14 @@ struct Run: Codable {
         groups.flatMap { g in g.photos.map(\.id).filter { g.pick.willMove($0) } }
     }
 
+    /// Photos still waiting for a decision to be carried out, on every tab.
+    var waiting: Int {
+        allGroups.reduce(0) { n, g in n + g.photos.filter { g.pick.willMove($0.id) }.count } + documentsToFile.count
+    }
+
+    /// Groups you've opened: work that a new scan would replace.
+    var reviewedGroups: Int { allGroups.filter { $0.reviewed == true }.count }
+
     /// Documents to file in PGDocuments (the best copy in each group) and the
     /// extra copies that go to Duplicates.
     var documentsToFile: [String] {

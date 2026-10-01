@@ -11,6 +11,8 @@ final class App {
 
     private enum Row {
         case heading(String)
+        /// The last scan, still being reviewed.
+        case resume(scope: String, detail: String)
         case source(Source, detail: String)
         case months(total: Int)
         /// A year on the months screen; ticking it ticks all its months.
@@ -40,6 +42,10 @@ final class App {
     private var ticked: Set<Date> = []
     private var anchor: Date?
     private var monthCounts: [Date: Int] = [:]
+    /// Esc was pressed once with months ticked; a second Esc drops them.
+    private var discardArmed = false
+    /// The unfinished review a new scan would replace, shown as a warning.
+    private var replacing: Run?
 
     init(options: Scanner.Options, intro: Bool = true) {
         self.options = options
@@ -70,26 +76,37 @@ final class App {
                     if taskCursor == 0 { options.documents.toggle() } else { options.describe.toggle() }
                 case .enter:
                     choosing = nil
+                    replacing = nil
                     if try await scan(source) == .quit { return }
-                case .escape, .backspace: choosing = nil
+                case .escape, .backspace:
+                    choosing = nil
+                    replacing = nil
                 case .quit, .char("q"): return
                 default: break
                 }
             } else if prompt != nil {
-                if let source = editPrompt(key) { choosing = source; taskCursor = 0 }
+                if let source = editPrompt(key) { choose(source) }
             } else if let action = handle(key) {
                 switch action {
                 case .quit: return
                 case .scan(let source):
-                    choosing = source
-                    taskCursor = 0
+                    choose(source)
+                case .resume:
+                    if try await resume() == .quit { return }
                 }
             }
             draw()
         }
     }
 
-    private enum Action { case quit, scan(Source) }
+    private enum Action { case quit, scan(Source), resume }
+
+    /// Opens "What should PixelGraph do?", noting any review it would replace.
+    private func choose(_ source: Source) {
+        choosing = source
+        taskCursor = 0
+        replacing = (try? Run.load()).flatMap { $0.reviewedGroups > 0 && $0.waiting > 0 ? $0 : nil }
+    }
 
     // MARK: - Rows
 
@@ -106,6 +123,11 @@ final class App {
     }
 
     private func loadHome() {
+        if let last = try? Run.load(), last.source != nil, last.waiting > 0 {
+            rows.append(.heading("PICK UP WHERE YOU LEFT OFF"))
+            rows.append(.resume(scope: last.scope, detail: "\(last.waiting) waiting · \(last.reviewedGroups) of \(last.allGroups.count) groups looked at"))
+            rows.append(.heading(""))
+        }
         let recents = Recents.all()
         rows.append(.heading("PHOTOS LIBRARY · iCloud Photos"))
         if photosAllowed {
@@ -224,7 +246,14 @@ final class App {
     /// from the last one ticked to this one, a click ticks; enter scans
     /// what's ticked, or the highlighted month or year when nothing is.
     private func handleMonths(_ key: Terminal.Key) -> (handled: Bool, action: Action?) {
+        let armed = discardArmed
+        discardArmed = false
         switch key {
+        case .escape, .left, .backspace:
+            guard !ticked.isEmpty, !armed else { return (false, nil) }
+            discardArmed = true
+            message = ui.amber("Press esc again to drop \(ticked.count) ticked month\(ticked.count == 1 ? "" : "s")")
+            return (true, nil)
         case .char(" "): tick(selected)
         case .char("x"): tickRange()
         case .click(let row, _):
@@ -273,6 +302,7 @@ final class App {
         case .heading: return nil
         case .source(let source, _): return opening ? nil : .scan(source)
         case .month(let source, _): return .scan(source)
+        case .resume: return .resume
         case .year: return nil
         case .months:
             screen = .months
@@ -336,6 +366,29 @@ final class App {
     }
 
     // MARK: - Scan
+
+    /// Back into the last scan's review, as it was left.
+    private func resume() async throws -> ReviewSession.Outcome {
+        defer { drawnFrame = nil }
+        guard let run = try? Run.load() else {
+            message = ui.red("The last scan can't be opened; scan again.")
+            return .home
+        }
+        if run.source?.isPhotos ?? true, !photosAllowed {
+            message = ui.red("PixelGraph needs access to Photos for that.")
+            return .home
+        }
+        let outcome: ReviewSession.Outcome
+        do {
+            outcome = try await ReviewSession(run: run, ui: ui).show()
+        } catch {
+            message = ui.red(error.localizedDescription)
+            return .home
+        }
+        screen = .home
+        load()
+        return outcome
+    }
 
     private func scan(_ source: Source) async throws -> ReviewSession.Outcome {
         // The scan and the review take over the screen, so the home screen
@@ -427,6 +480,11 @@ final class App {
                     task(0, options.documents, "Sort documents", "receipts, forms, screenshots → PGDocuments"),
                     task(1, options.describe, "Tag scenes", "what's in each grouped photo: beach, dog, sunset"),
                     "",
+                ] + (replacing.map { last in [
+                    ui.amber("This replaces your unfinished review of \(ui.fit(last.scope, 34)) (\(last.waiting) waiting)."),
+                    ui.dim("Esc, then “Continue reviewing”, to go back to it instead."),
+                    "",
+                ] } ?? []) + [
                     ui.dim("↑↓ choose · space tick · enter start · esc back"),
                 ], width: 82)
             }
@@ -466,6 +524,7 @@ final class App {
         case .source(let source, _), .month(let source, _): action = ui.button("Scan \(ui.fit(source.description, 28))")
         case .scanHere(let url, _): action = ui.button("Scan \(ui.fit(url.lastPathComponent, 28))")
         case .browse, .folder, .months: action = ui.button("Open")
+        case .resume: action = ui.button("Continue")
         default: action = ""
         }
         let backHint = screen == .home ? "" : " · ← back"
@@ -496,6 +555,8 @@ final class App {
     private func render(_ row: Row, width: Int) -> String {
         switch row {
         case .heading(let text): return ui.dim(text)
+        case .resume(let scope, let detail):
+            return ui.spread(ui.bold("Continue reviewing ") + scope, ui.dim(detail), width: width)
         case .source(let source, let detail):
             return ui.spread(source.description, ui.dim(detail), width: width)
         case .months(let total):

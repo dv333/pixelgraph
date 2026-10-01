@@ -52,7 +52,7 @@ One key means one thing on every screen, and keys set a state rather than toggli
 | ← → ↑ ↓ | move around (mouse wheel and Page Up/Down scroll the groups) |
 | Space | look closer, like Quick Look · again to go back |
 | Enter | open · confirm |
-| Esc | back · cancel — never changes anything |
+| Esc | back · cancel — never changes anything; leaving the review asks first |
 | K | keep this photo (on a group: keep them all) |
 | X | move this photo (on a group: all but the best) |
 | B | make it the best ★ |
@@ -62,7 +62,7 @@ One key means one thing on every screen, and keys set a state rather than toggli
 | Tab | switch between Duplicates, Documents and Junk |
 | U | undo the last change or move |
 | ? | all the keys |
-| Q | quit — everything is saved as you go |
+| Q | quit — asks first; everything is saved as you go |
 
 In iTerm2 photos are shown as real images; other true-colour terminals get colour-block previews.
 

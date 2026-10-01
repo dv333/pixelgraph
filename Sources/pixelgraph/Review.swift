@@ -15,7 +15,7 @@ final class ReviewSession {
     private let fromHome: Bool
 
     private enum Screen { case groups, group, photo, compare }
-    private enum Sheet { case reason, confirm(file: [String], duplicates: [String], describe: [String]), help }
+    private enum Sheet { case reason, confirm(file: [String], duplicates: [String], describe: [String]), help, leave(Outcome) }
     private enum Overview { case mosaic, filmstrip }
     private enum Hit { case group(Int), photo(Int), more }
 
@@ -117,10 +117,30 @@ final class ReviewSession {
         if key == .resize { return nil }
         toast = nil
 
-        // q and ctrl-c quit from anywhere, closing any open sheet.
+        // Leaving always asks first: a stray Esc or q shouldn't end a long review.
+        if case .leave(let outcome)? = sheet {
+            switch key {
+            case .enter, .char("y"):
+                sheet = nil
+                return outcome
+            case .quit, .char("q"):
+                // q again while asked to quit means yes; on "back home" it asks to quit instead.
+                if outcome == .quit {
+                    sheet = nil
+                    return .quit
+                }
+                sheet = .leave(.quit)
+            case .escape, .backspace, .char("n"), .click:
+                sheet = nil
+                needsFull = true
+            default: break
+            }
+            return nil
+        }
+        // q and ctrl-c ask before quitting, from anywhere.
         if key == .quit || key == .char("q") {
-            sheet = nil
-            return .quit
+            sheet = .leave(.quit)
+            return nil
         }
         if let sheet {
             await handleSheet(sheet, key)
@@ -158,7 +178,7 @@ final class ReviewSession {
                 scroll = 0
                 needsFull = true
             case .char("u"): await undo()
-            case .escape where fromHome: return .home
+            case .escape where fromHome: sheet = .leave(.home)
             case .click(let row, let col):
                 switch hit(row, col) {
                 case .group(let i)?: open(i)
@@ -240,6 +260,8 @@ final class ReviewSession {
             }
         case .help:
             sheet = nil
+        case .leave:
+            break
         case .confirm(let file, let duplicates, let describe):
             switch key {
             case .enter, .char("y"), .char("p"):
@@ -621,6 +643,7 @@ final class ReviewSession {
         case .reason: out += reasonSheet()
         case .confirm(let file, let duplicates, let describe): out += confirmSheet(file: file, duplicates: duplicates, describe: describe)
         case .help: out += helpSheet()
+        case .leave(let outcome): out += leaveSheet(outcome)
         case nil: break
         }
         ui.term.write(out)
@@ -1210,6 +1233,24 @@ final class ReviewSession {
         }
         lines += ["", ui.dim(suggestion == nil ? "enter other · esc cancel" : "enter use suggestion · esc cancel")]
         return ui.sheet(lines)
+    }
+
+    /// Asks before leaving the review. Nothing is lost either way (choices
+    /// are saved as you go), but a stray key shouldn't end a long session.
+    private func leaveSheet(_ outcome: Outcome) -> String {
+        let waiting = run.waiting
+        let note = waiting > 0
+            ? "\(waiting) photo\(waiting == 1 ? " is" : "s are") still selected to move or file; that waits for you."
+            : "Everything you chose has been carried out."
+        let width = min(ui.cols - 2, 64) - 4
+        let (title, after, button) = outcome == .home
+            ? ("Back to the start screen?", "“Continue reviewing” on the start screen brings you back here.", "enter Leave")
+            : ("Quit PixelGraph?", "Run pixelgraph again to continue where you left off.", "enter Quit")
+        var lines = [ui.bold(title), ""]
+        lines += ui.wrap("Your choices are saved. \(note)", width: width, lines: 3).map { ui.dim($0) }
+        lines += ui.wrap(after, width: width, lines: 2).map { ui.dim($0) }
+        lines += ["", ui.spread("", ui.dim("esc Stay   ") + ui.button(button), width: width)]
+        return ui.sheet(lines, width: 68)
     }
 
     /// The move sheet: enter (or p) moves the copies to PGDuplicates, d
