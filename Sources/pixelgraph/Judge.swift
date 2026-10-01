@@ -87,6 +87,12 @@ struct Judge: Sendable {
         return try await ask(prompt, images: [image], schema: schema)
     }
 
+    /// Ollama's /api/chat answer.
+    private struct Reply: Decodable {
+        struct Message: Decodable { var content: String }
+        var message: Message
+    }
+
     private func ask<T: Decodable>(_ prompt: String, images: [Data], schema: JSON) async throws -> T {
         let body: JSON = [
             "model": model,
@@ -112,10 +118,6 @@ struct Judge: Sendable {
         guard let status = (response as? HTTPURLResponse)?.statusCode, status == 200 else {
             let text = String(decoding: data.prefix(300), as: UTF8.self)
             throw Failure(message: "Ollama said: \(text). Is the model pulled? Try `ollama pull \(model)`.")
-        }
-        struct Reply: Decodable {
-            struct Message: Decodable { var content: String }
-            var message: Message
         }
         let reply = try JSONDecoder().decode(Reply.self, from: data)
         do {
