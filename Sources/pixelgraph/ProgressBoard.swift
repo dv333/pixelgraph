@@ -36,6 +36,7 @@ final class ProgressBoard: @unchecked Sendable {
 
     func begin() {
         guard live else { print(heading); return }
+        if !fullScreen { Theme.detect() }
         if !fullScreen { write("\u{1B}[?25l") }
         draw(force: true)
     }
@@ -156,9 +157,9 @@ final class ProgressBoard: @unchecked Sendable {
             let (r, g, b) = (Int(10 + 90 * t), Int(110 + 70 * t), 255)
             out += "\u{1B}[38;2;\(r);\(g);\(b)m█"
         }
-        if part > 0 { out += "\u{1B}[38;2;100;180;255m" + ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"][part] }
+        if part > 0 { out += Theme.fg(Theme.blue) + ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"][part] }
         let used = full + (part > 0 ? 1 : 0)
-        out += "\u{1B}[38;2;58;58;62m" + String(repeating: "━", count: max(0, width - used))
+        out += Theme.fg(Theme.track) + String(repeating: "━", count: max(0, width - used))
         return out + "\u{1B}[0m"
     }
 
@@ -182,6 +183,6 @@ final class ProgressBoard: @unchecked Sendable {
     private func write(_ text: String) { FileHandle.standardOutput.write(Data(text.utf8)) }
     private func bold(_ s: String) -> String { "\u{1B}[1m\(s)\u{1B}[22m" }
     private func dim(_ s: String) -> String { "\u{1B}[2m\(s)\u{1B}[22m" }
-    private func green(_ s: String) -> String { "\u{1B}[38;2;48;209;88m\(s)\u{1B}[39m" }
-    private func blue(_ s: String) -> String { "\u{1B}[38;2;100;168;255m\(s)\u{1B}[39m" }
+    private func green(_ s: String) -> String { Theme.fg(Theme.green) + s + "\u{1B}[39m" }
+    private func blue(_ s: String) -> String { Theme.fg(Theme.blue) + s + "\u{1B}[39m" }
 }

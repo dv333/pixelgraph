@@ -80,7 +80,7 @@ struct Scanner {
 
     private func summary(groups: Int, moving: Int, problems: Int) -> String {
         var parts = ["\u{1B}[1m\(groups)\u{1B}[22m groups", "\u{1B}[1m\(moving)\u{1B}[22m photos you could move"]
-        if problems > 0 { parts.append("\u{1B}[38;2;255;179;64m\(problems)\u{1B}[39m look like rejects") }
+        if problems > 0 { parts.append(Theme.fg(Theme.amber) + "\(problems)\u{1B}[39m look like rejects") }
         return parts.joined(separator: " · ")
     }
 

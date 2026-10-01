@@ -20,6 +20,7 @@ final class UI: @unchecked Sendable {
 
     func enter() {
         guard !active else { return }
+        Theme.detect()
         term.enter()
         active = true
     }
@@ -40,19 +41,32 @@ final class UI: @unchecked Sendable {
     func at(_ row: Int, _ col: Int) -> String { "\u{1B}[\(row);\(col)H" }
     func bold(_ s: String) -> String { "\u{1B}[1m\(s)\u{1B}[22m" }
     func dim(_ s: String) -> String { "\u{1B}[2m\(s)\u{1B}[22m" }
-    func green(_ s: String) -> String { "\u{1B}[38;2;48;209;88m\(s)\u{1B}[39m" }
-    func red(_ s: String) -> String { "\u{1B}[38;2;255;105;97m\(s)\u{1B}[39m" }
-    func amber(_ s: String) -> String { "\u{1B}[38;2;255;179;64m\(s)\u{1B}[39m" }
-    func blue(_ s: String) -> String { "\u{1B}[38;2;100;168;255m\(s)\u{1B}[39m" }
-    func gray(_ s: String) -> String { "\u{1B}[38;2;99;99;102m\(s)\u{1B}[39m" }
+    func green(_ s: String) -> String { Theme.fg(Theme.green) + s + "\u{1B}[39m" }
+    func red(_ s: String) -> String { Theme.fg(Theme.red) + s + "\u{1B}[39m" }
+    func amber(_ s: String) -> String { Theme.fg(Theme.amber) + s + "\u{1B}[39m" }
+    func blue(_ s: String) -> String { Theme.fg(Theme.blue) + s + "\u{1B}[39m" }
+    func gray(_ s: String) -> String { Theme.fg(Theme.line) + s + "\u{1B}[39m" }
 
     /// A filled button, like the one primary action on a screen.
-    func button(_ s: String) -> String { "\u{1B}[48;2;10;132;255m\u{1B}[38;2;255;255;255m \(s) \u{1B}[0m" }
+    func button(_ s: String) -> String { Theme.bg(Theme.accent) + "\u{1B}[38;2;255;255;255m \(plain(s)) \u{1B}[0m" }
 
-    /// A highlighted row, for the selected item in a list.
+    /// The selected row in a list: white text on a solid blue bar, so it reads
+    /// the same on light and dark terminals.
     func highlight(_ s: String, width: Int) -> String {
-        "\u{1B}[48;2;31;58;95m" + s.replacingOccurrences(of: "\u{1B}[0m", with: "\u{1B}[0m\u{1B}[48;2;31;58;95m")
-            + String(repeating: " ", count: max(0, width - visibleWidth(s))) + "\u{1B}[0m"
+        let text = plain(s)
+        return Theme.bg(Theme.accent) + "\u{1B}[38;2;255;255;255m" + text
+            + String(repeating: " ", count: max(0, width - text.count)) + "\u{1B}[0m"
+    }
+
+    /// Text without colour or weight codes.
+    func plain(_ styled: String) -> String {
+        var out = "", inEscape = false
+        for ch in styled {
+            if inEscape { if ch.isLetter { inEscape = false }; continue }
+            if ch == "\u{1B}" { inEscape = true; continue }
+            out.append(ch)
+        }
+        return out
     }
 
     /// Cuts styled text to `width` visible characters, keeping its colour codes.
@@ -137,7 +151,7 @@ final class UI: @unchecked Sendable {
     /// A centred panel over the current screen, for confirmations and choices.
     func sheet(_ lines: [String], width preferred: Int = 60) -> String {
         let width = min(cols - 2, preferred)
-        let panel = "\u{1B}[48;2;36;36;40m"
+        let panel = Theme.bg(Theme.panel) + Theme.fg(Theme.panelText)
         let top = max(2, (rows - lines.count) / 2), left = (cols - width) / 2 + 1
         var out = ""
         for (y, text) in ([""] + lines + [""]).enumerated() {
