@@ -1232,7 +1232,7 @@ final class ReviewSession {
             } else {
                 keep = "out of \(name), into the “\(Library.duplicatesAlbum)” album; still in your library"
             }
-        case .dates:
+        case .dates, .months:
             keep = "into the “\(Library.duplicatesAlbum)” album; still in your library"
         case .folder(let path):
             keep = "into “\(Files.duplicatesFolder)” inside \((path as NSString).lastPathComponent), with RAW and sidecars"

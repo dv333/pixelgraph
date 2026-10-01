@@ -29,7 +29,7 @@ pixelgraph
 
 In iTerm2, Ghostty, kitty and WezTerm, PixelGraph opens with a short title: a field of out-of-focus lights racks into focus and becomes the name. Any key skips it; `--no-intro` or `PIXELGRAPH_NO_INTRO=1` turns it off.
 
-Choose where your photos are — an album, a month of your library, a folder, a drive or iCloud Drive — and PixelGraph scans it, then opens the review.
+Choose where your photos are — an album, a month of your library, a folder, a drive or iCloud Drive — and PixelGraph scans it, then opens the review. On the months screen, Space ticks a month (or a whole year), X ticks every month from the last one you ticked, and Enter scans just the ticked months, even ones far apart.
 
 ```
 pixelgraph scan --album "Japan 2025"         # an Apple Photos album

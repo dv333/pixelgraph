@@ -405,3 +405,13 @@ private func withFaces(_ p: Photo, _ faces: [FaceDetail]) -> Photo {
     #expect(Verifier.correlation(sharp, sharp, 0, 0) > 0.99)
     #expect(Quality.distance(Quality.hash(checks), Quality.hash(checks)) == 0)
 }
+
+@Test func tickedMonthsBecomeOneRangeOrExactlyThoseMonths() throws {
+    let calendar = Calendar.current
+    func month(_ y: Int, _ m: Int) throws -> Date { try #require(calendar.date(from: DateComponents(year: y, month: m, day: 1))) }
+    let together = Source.selection(of: [try month(2021, 3), try month(2021, 1), try month(2021, 2)])
+    #expect(together == .dates(from: try month(2021, 1), to: try month(2021, 4)))
+    let apart = Source.selection(of: [try month(2022, 3), try month(2021, 1), try month(2021, 2)])
+    #expect(apart == .months([try month(2021, 1), try month(2021, 2), try month(2022, 3)]))
+    #expect(Source.runs([try month(2021, 1), try month(2021, 2), try month(2022, 3)]).count == 2)
+}

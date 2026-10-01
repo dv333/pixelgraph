@@ -10,6 +10,9 @@ import QuickLookThumbnailing
 enum Source: Codable, Hashable, CustomStringConvertible {
     case album(id: String, title: String)
     case dates(from: Date?, to: Date?)
+    /// Months of the Photos library that aren't next to each other, by the
+    /// first moment of each, oldest first.
+    case months([Date])
     case folder(path: String)
 
     var description: String {
@@ -19,6 +22,11 @@ enum Source: Codable, Hashable, CustomStringConvertible {
             let f = DateFormatter()
             f.dateFormat = "MMM yyyy"
             return "Photos, \(from.map(f.string) ?? "start") – \(to.map { f.string(from: $0.addingTimeInterval(-1)) } ?? "now")"
+        case .months(let starts):
+            let f = DateFormatter()
+            f.dateFormat = "MMM yyyy"
+            let parts = Source.runs(starts).map { $0.first == $0.last ? f.string(from: $0.first) : "\(f.string(from: $0.first)) – \(f.string(from: $0.last))" }
+            return "Photos, " + (parts.count <= 2 ? parts.joined(separator: ", ") : parts.prefix(2).joined(separator: ", ") + " +\(parts.count - 2) more")
         case .folder(let path): return (path as NSString).lastPathComponent
         }
     }
@@ -26,7 +34,7 @@ enum Source: Codable, Hashable, CustomStringConvertible {
     var kind: String {
         switch self {
         case .album: return "Photos album"
-        case .dates: return "Photos library"
+        case .dates, .months: return "Photos library"
         case .folder(let path):
             if path.hasPrefix("/Volumes/") { return "External drive" }
             if path.contains("/Library/Mobile Documents/") { return "iCloud Drive" }
@@ -43,6 +51,30 @@ enum Source: Codable, Hashable, CustomStringConvertible {
     var isPhotos: Bool {
         if case .folder = self { return false }
         return true
+    }
+
+    /// The months starting at `starts`: one date range when they run on
+    /// without a gap, otherwise exactly those months.
+    static func selection(of starts: [Date]) -> Source {
+        let sorted = Array(Set(starts)).sorted()
+        let grouped = runs(sorted)
+        if grouped.count == 1, let run = grouped.first {
+            return .dates(from: run.first, to: Calendar.current.date(byAdding: .month, value: 1, to: run.last))
+        }
+        return .months(sorted)
+    }
+
+    /// Consecutive months grouped together, oldest first.
+    static func runs(_ starts: [Date]) -> [(first: Date, last: Date)] {
+        var runs: [(first: Date, last: Date)] = []
+        for start in starts.sorted() {
+            if let last = runs.last, Calendar.current.date(byAdding: .month, value: 1, to: last.last) == start {
+                runs[runs.count - 1].last = start
+            } else {
+                runs.append((start, start))
+            }
+        }
+        return runs
     }
 }
 
@@ -150,6 +182,10 @@ enum Items {
             return try Library.assets(inAlbum: id, title: title).map(Item.init)
         case .dates(let from, let to):
             return Library.assets(from: from, to: to).map(Item.init)
+        case .months(let starts):
+            return starts.sorted().flatMap { start in
+                Library.assets(from: start, to: Calendar.current.date(byAdding: .month, value: 1, to: start)).map(Item.init)
+            }
         case .folder(let path):
             return try Files.images(in: URL(fileURLWithPath: path)).compactMap(Item.init(file:))
                 .sorted { $0.date < $1.date }

@@ -13,6 +13,8 @@ final class App {
         case heading(String)
         case source(Source, detail: String)
         case months(total: Int)
+        /// A year on the months screen; ticking it ticks all its months.
+        case year(Int, months: [Date], count: Int)
         case month(Source, count: Int)
         case browse(URL, title: String, detail: String)
         case choose
@@ -33,6 +35,11 @@ final class App {
     private var message: String?
     private var photosAllowed = false
     private let intro: Bool
+    /// Months ticked on the months screen (their first moments), the last
+    /// one ticked (where x ranges from), and each month's photo count.
+    private var ticked: Set<Date> = []
+    private var anchor: Date?
+    private var monthCounts: [Date: Int] = [:]
 
     init(options: Scanner.Options, intro: Bool = true) {
         self.options = options
@@ -88,6 +95,7 @@ final class App {
 
     private func load() {
         rows = []
+        if screen != .months { ticked = []; anchor = nil }
         switch screen {
         case .home: loadHome()
         case .months: loadMonths()
@@ -133,10 +141,30 @@ final class App {
 
     private func loadMonths() {
         rows.append(.heading("ALL PHOTOS, BY MONTH"))
-        for month in Library.months() {
-            rows.append(.month(.dates(from: month.start, to: month.end), count: month.count))
+        monthCounts = [:]
+        let months = Library.months()
+        let years = Dictionary(grouping: months) { Calendar.current.component(.year, from: $0.start) }
+        for year in years.keys.sorted(by: >) {
+            let list = years[year] ?? []
+            rows.append(.year(year, months: list.map(\.start), count: list.reduce(0) { $0 + $1.count }))
+            for month in list {
+                monthCounts[month.start] = month.count
+                rows.append(.month(.dates(from: month.start, to: month.end), count: month.count))
+            }
         }
     }
+
+    /// The first moment of a month row's month.
+    private func monthStart(_ row: Row) -> Date? {
+        if case .month(.dates(let from?, _), _) = row { return from }
+        return nil
+    }
+
+    private static let monthName: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMMM"
+        return f
+    }()
 
     private func loadFolder(_ url: URL) {
         let fm = FileManager.default
@@ -169,6 +197,10 @@ final class App {
 
     private func handle(_ key: Terminal.Key) -> Action? {
         message = nil
+        if screen == .months {
+            let (handled, action) = handleMonths(key)
+            if handled { return action }
+        }
         switch key {
         case .quit, .char("q"): return .quit
         case .up: move(-1)
@@ -188,6 +220,48 @@ final class App {
         return nil
     }
 
+    /// Ticking months: space ticks one (or a whole year), x ticks every month
+    /// from the last one ticked to this one, a click ticks; enter scans
+    /// what's ticked, or the highlighted month or year when nothing is.
+    private func handleMonths(_ key: Terminal.Key) -> (handled: Bool, action: Action?) {
+        switch key {
+        case .char(" "): tick(selected)
+        case .char("x"): tickRange()
+        case .click(let row, _):
+            let index = row - listTop + scroll
+            if rows.indices.contains(index), isSelectable(rows[index]) {
+                selected = index
+                tick(index)
+            }
+        case .enter, .right:
+            if !ticked.isEmpty { return (true, .scan(Source.selection(of: Array(ticked)))) }
+            if case .year(_, let months, _) = rows[selected] { return (true, .scan(Source.selection(of: months))) }
+            return (false, nil)
+        default: return (false, nil)
+        }
+        return (true, nil)
+    }
+
+    private func tick(_ index: Int) {
+        guard rows.indices.contains(index) else { return }
+        if case .year(_, let months, _) = rows[index] {
+            if months.allSatisfy(ticked.contains) { ticked.subtract(months) } else { ticked.formUnion(months) }
+            anchor = nil
+        } else if let start = monthStart(rows[index]) {
+            if ticked.contains(start) { ticked.remove(start) } else { ticked.insert(start) }
+            anchor = start
+        }
+    }
+
+    private func tickRange() {
+        guard let end = monthStart(rows[selected]), let start = anchor else { return tick(selected) }
+        let (low, high) = start < end ? (start, end) : (end, start)
+        for row in rows {
+            if let month = monthStart(row), month >= low, month <= high { ticked.insert(month) }
+        }
+        anchor = end
+    }
+
     private func move(_ step: Int) {
         var next = selected + step
         while rows.indices.contains(next), !isSelectable(rows[next]) { next += step }
@@ -199,6 +273,7 @@ final class App {
         case .heading: return nil
         case .source(let source, _): return opening ? nil : .scan(source)
         case .month(let source, _): return .scan(source)
+        case .year: return nil
         case .months:
             screen = .months
             load()
@@ -323,7 +398,7 @@ final class App {
         let visible = max(1, ui.rows - listTop - 3)
         if selected < scroll { scroll = selected }
         if selected >= scroll + visible { scroll = selected - visible + 1 }
-        let key = "\(screen) \(scroll) \(rows.count) \(ui.cols)x\(ui.rows) \(prompt ?? "-") \(message ?? "-") \(choosing != nil) \(taskCursor) \(options.documents) \(options.describe)"
+        let key = "\(screen) \(scroll) \(rows.count) \(ui.cols)x\(ui.rows) \(prompt ?? "-") \(message ?? "-") \(choosing != nil) \(taskCursor) \(options.documents) \(options.describe) \(ticked.count)"
 
         var out: String
         if key == drawnFrame, prompt == nil, choosing == nil {
@@ -386,7 +461,7 @@ final class App {
     }
 
     private func actionBar() -> String {
-        let action: String
+        var action: String
         switch rows.indices.contains(selected) ? rows[selected] : .choose {
         case .source(let source, _), .month(let source, _): action = ui.button("Scan \(ui.fit(source.description, 28))")
         case .scanHere(let url, _): action = ui.button("Scan \(ui.fit(url.lastPathComponent, 28))")
@@ -397,8 +472,21 @@ final class App {
         let scanHint: String
         if case .browser = screen { scanHint = " · s scan this folder" } else { scanHint = "" }
         // The bar lines up with the column above it.
-        let hints = "↑↓ choose · enter \(screen == .home ? "scan" : "open")\(scanHint)\(backHint) · q quit"
-        let short = "↑↓ · enter\(backHint) · q"
+        var hints = "↑↓ choose · enter \(screen == .home ? "scan" : "open")\(scanHint)\(backHint) · q quit"
+        var short = "↑↓ · enter\(backHint) · q"
+        if screen == .months, rows.indices.contains(selected) {
+            hints = "↑↓ choose · space tick · x tick range · enter scan · ← back · q quit"
+            short = "space tick · x range · enter scan"
+            if !ticked.isEmpty {
+                let photos = ticked.reduce(0) { $0 + (monthCounts[$1] ?? 0) }
+                action = ui.button("Scan \(ticked.count) month\(ticked.count == 1 ? "" : "s") · \(photos.formatted()) photos")
+            } else if case .year(let year, _, _) = rows[selected] {
+                action = ui.button("Scan \(year)")
+            } else if let start = monthStart(rows[selected]) {
+                let year = Calendar.current.component(.year, from: start)
+                action = ui.button("Scan \(Self.monthName.string(from: start)) \(year)")
+            }
+        }
         let room = columnWidth - ui.visibleWidth(action) - 2
         let text = ui.visibleWidth(hints) <= room ? hints : short
         return ui.at(ui.rows, 1) + "\u{1B}[2K" + ui.at(ui.rows, left)
@@ -412,8 +500,15 @@ final class App {
             return ui.spread(source.description, ui.dim(detail), width: width)
         case .months(let total):
             return ui.spread("All photos, by month…", ui.dim("\(total.formatted()) photos"), width: width)
+        case .year(let year, let months, let count):
+            let all = months.allSatisfy(ticked.contains), some = months.contains(where: ticked.contains)
+            let box = all ? ui.green("[✓]") : some ? ui.green("[–]") : ui.dim("[ ]")
+            return ui.spread(box + " " + ui.bold(String(year)), ui.dim("\(count.formatted()) photos"), width: width)
         case .month(let source, let count):
-            return ui.spread(source.description.replacingOccurrences(of: "Photos, ", with: ""), ui.dim("\(count.formatted()) photos"), width: width)
+            let start = monthStart(row)
+            let box = start.map(ticked.contains) == true ? ui.green("[✓]") : ui.dim("[ ]")
+            let name = start.map { Self.monthName.string(from: $0) } ?? source.description
+            return ui.spread("    " + box + " " + name, ui.dim("\(count.formatted()) photos"), width: width)
         case .browse(_, let title, let detail):
             return ui.spread(title, ui.dim(detail), width: width)
         case .choose:

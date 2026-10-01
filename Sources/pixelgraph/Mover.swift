@@ -56,14 +56,14 @@ enum Mover {
                      batch: UUID = UUID()) async throws -> Record {
         var record = Record(date: .now, source: source, destination: target, batch: batch, ids: ids, files: [])
         switch (source, target) {
-        case (.album, .trash), (.dates, .trash):
+        case (.album, .trash), (.dates, .trash), (.months, .trash):
             try await Library.delete(ids)
             record.deleted = true
         case (.album(let id, _), _):
             record.place = target.album
             let removed = try await Library.move(ids, to: target.album, from: id)
             if !removed { record.leftInSource = true }
-        case (.dates, _):
+        case (.dates, _), (.months, _):
             record.place = target.album
             try await Library.move(ids, to: target.album, from: nil)
         case (.folder, .trash):
@@ -131,7 +131,7 @@ enum Mover {
             }
             switch record.source {
             case .album(let id, _): try await Library.restore(record.ids, from: record.album, to: id)
-            case .dates: try await Library.restore(record.ids, from: record.album, to: nil)
+            case .dates, .months: try await Library.restore(record.ids, from: record.album, to: nil)
             case .folder:
                 for move in record.files.reversed() {
                     let back = URL(fileURLWithPath: move.from)
