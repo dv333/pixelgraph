@@ -435,3 +435,70 @@ enum Staged {
         load().filter { now.timeIntervalSince($0.date) >= Double(days) * 86_400 }
     }
 }
+
+// MARK: - Showing the person
+
+extension Agent {
+    /// Opens PixelGraph's review for the person, on `group` when given: in
+    /// iTerm2, a pane split off the window the assistant runs in (it closes
+    /// when they leave the review); elsewhere a new Terminal window.
+    static func openReview(_ workspace: Workspace, group: String?) throws -> String {
+        let run = try Run.load(from: workspace.runFile)
+        if let group { _ = try place(group, in: run) }
+        let me = Bundle.main.executableURL?.path ?? CommandLine.arguments[0]
+        var command = (me.contains(" ") ? "\"\(me)\"" : me) + " review"
+        if workspace == .nightly { command += " --nightly" }
+        if let group { command += " --group \(group)" }
+
+        let env = ProcessInfo.processInfo.environment
+        let iTerm = env["ITERM_SESSION_ID"] != nil || env["LC_TERMINAL"] == "iTerm2" || env["TERM_PROGRAM"] == "iTerm.app"
+        // ITERM_SESSION_ID is "w0t1p0:<unique id>": the pane the assistant runs in.
+        let session = env["ITERM_SESSION_ID"]?.split(separator: ":").last.map(String.init) ?? ""
+        let script = iTerm ? """
+            on run argv
+              set target to item 1 of argv
+              set cmd to item 2 of argv
+              tell application "iTerm2"
+                repeat with w in windows
+                  repeat with t in tabs of w
+                    repeat with s in sessions of t
+                      if unique id of s is target then
+                        tell s to split vertically with default profile command cmd
+                        return "split"
+                      end if
+                    end repeat
+                  end repeat
+                end repeat
+                tell current session of current window to split vertically with default profile command cmd
+                return "split"
+              end tell
+            end run
+            """ : """
+            on run argv
+              tell application "Terminal"
+                activate
+                do script (item 2 of argv)
+              end tell
+              return "window"
+            end run
+            """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script, session, command]
+        let errors = Pipe()
+        process.standardError = errors
+        process.standardOutput = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let detail = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            throw Failure("Couldn't open the review (\(detail.trimmingCharacters(in: .whitespacesAndNewlines))). "
+                + "If macOS asked whether this app may control \(iTerm ? "iTerm2" : "Terminal"), allow it in System Settings → Privacy & Security → Automation, then try again. "
+                + "Or run: \(command)")
+        }
+        let what = group.map { "group \($0)" } ?? "the groups"
+        let where_ = iTerm ? "in a pane beside this one" : "in a new Terminal window"
+        return "Opened \(what) in PixelGraph's review \(where_). The person can keep or move photos there; "
+            + "changes are saved, so call list_groups again afterwards to see them."
+    }
+}

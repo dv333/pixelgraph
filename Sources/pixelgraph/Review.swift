@@ -39,9 +39,13 @@ final class ReviewSession {
     /// and whether kept photos are described.
     private let settings = Settings.load()
 
+    /// The group to open first, e.g. g3 or j1.
+    private let start: String?
+
     init(run: Run, runFile: URL = Paths.lastRun, folder: URL = Paths.report,
-         graphics: TerminalImage.Mode = .auto, ui: UI? = nil) throws {
+         graphics: TerminalImage.Mode = .auto, ui: UI? = nil, start: String? = nil) throws {
         self.run = run
+        self.start = start
         self.runFile = runFile
         self.folder = folder
         self.images = try Report.manifest(in: folder)
@@ -99,6 +103,7 @@ final class ReviewSession {
             }
         }
         Places.note(.opened, run.source)
+        if let start, let index = groupIndex(start) { open(index) }
         draw()
         while true {
             let key = ui.term.nextKey()
@@ -363,6 +368,15 @@ final class ReviewSession {
 
     private func select(_ index: Int) {
         groupIndex = min(max(index, 0), groups.count - 1)
+    }
+
+    /// Where g3 (lookalikes) or j1 (junk) is on the Duplicates tab, which
+    /// lists the lookalikes and then the junk.
+    private func groupIndex(_ id: String) -> Int? {
+        guard let kind = id.lowercased().first, let n = Int(id.dropFirst()), n >= 1 else { return nil }
+        if kind == "g", n <= run.groups.count { return n - 1 }
+        if kind == "j", n <= (run.junkGroups ?? []).count { return run.groups.count + n - 1 }
+        return nil
     }
 
     private func open(_ index: Int) {

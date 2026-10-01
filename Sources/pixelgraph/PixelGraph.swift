@@ -156,6 +156,9 @@ struct Review: AsyncParsableCommand {
     @Flag(help: "Review the close calls the nightly clean-up left.")
     var nightly = false
 
+    @Option(help: "Open straight on this group, e.g. g3 (lookalikes) or j1 (junk).")
+    var group: String?
+
     func run() async throws {
         guard isatty(STDIN_FILENO) != 0, isatty(STDOUT_FILENO) != 0 else {
             throw ValidationError("pixelgraph review needs an interactive terminal.")
@@ -172,7 +175,7 @@ struct Review: AsyncParsableCommand {
             return
         }
         if run.source?.isPhotos ?? true, folder == nil { try await Library.requestAccess() }
-        try await ReviewSession(run: run, runFile: runFile, folder: reportFolder, graphics: graphics ?? Settings.load().graphics).show()
+        try await ReviewSession(run: run, runFile: runFile, folder: reportFolder, graphics: graphics ?? Settings.load().graphics, start: group).show()
     }
 }
 

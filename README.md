@@ -194,6 +194,7 @@ Using a cloud model? Leave out `provider` and `model`. `--no-trash` means the as
 - "Show me the close calls one group at a time and pick the best."
 - "Do a dry run of moving the duplicates, then move them."
 - "Undo that."
+- "Show me group g3." OpenCode can't show pictures in its chat, so PixelGraph opens its own review on that group: in iTerm2 as a pane beside OpenCode (it closes when you leave the review), elsewhere in a new Terminal window. Keep or move photos there; the assistant sees your changes. The first time, macOS asks whether pixelgraph may control iTerm2: allow it. (`pixelgraph review --group g3` does the same by hand.)
 
 To check it's connected, ask "which pixelgraph tools do you have?": it should list scan, list_groups, show_photos, move and the rest.
 

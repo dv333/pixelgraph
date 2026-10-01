@@ -42,7 +42,9 @@ final class MCPServer: @unchecked Sendable {
         will happen, then move with dry_run false. Photos in a group are lettered A, B, C. \
         Keep photos that are genuinely different moments. Never delete unless the person asked \
         for it in so many words. Every move can be undone with undo. The nightly run works in \
-        the "nightly" workspace and leaves close calls there for you.
+        the "nightly" workspace and leaves close calls there for you. Images you get from \
+        show_photos are for you; the person can't see them in this chat, so when they want to \
+        see photos, call open_review.
         """
 
     // MARK: - Transports
@@ -209,6 +211,10 @@ final class MCPServer: @unchecked Sendable {
                 "group": ["type": "string", "description": "Group id from list_groups, e.g. g3."],
                 "photos": ["type": "array", "items": ["type": "string"], "description": "Letters; default the first 8."] as JSON,
             ], required: ["group"], readOnly: true),
+            tool("open_review", "Show the person a group's photos themselves: opens PixelGraph's review on their screen (beside this window in iTerm2), where they can look, keep and move. Use it whenever they ask to see the photos; you can't show images in this chat.", [
+                "workspace": workspace,
+                "group": ["type": "string", "description": "Group id from list_groups, e.g. g3; leave out for the list of groups."],
+            ], readOnly: true),
             tool("set_pick", "Change who's kept in a group: best becomes the one ★, keep are kept too, move go when you move.", [
                 "workspace": workspace,
                 "group": ["type": "string"],
@@ -271,6 +277,9 @@ final class MCPServer: @unchecked Sendable {
                 content.append(["type": "image", "data": data.base64EncodedString(), "mimeType": "image/jpeg"])
             }
             return content
+
+        case "open_review":
+            return text(try Agent.openReview(workspace, group: args["group"] as? String))
 
         case "set_pick":
             guard let id = args["group"] as? String else { throw Agent.Failure("Which group? Give its id, e.g. g3.") }
