@@ -8,6 +8,7 @@ import ImageIO
 final class Terminal: @unchecked Sendable {
     enum Key: Equatable {
         case left, right, up, down, escape, enter, backspace, quit, resize
+        case pageUp, pageDown, scrollUp, scrollDown, tab
         case char(Character)
         /// 1-based screen position of a left click.
         case click(row: Int, col: Int)
@@ -15,6 +16,15 @@ final class Terminal: @unchecked Sendable {
 
     private var original = termios()
     private var lastSize = (cols: 0, rows: 0)
+
+    /// A character cell's width ÷ height. iTerm2 reports its pixel size;
+    /// otherwise assume the usual 1:2.
+    var cellAspect: Double {
+        var ws = winsize()
+        guard ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0, ws.ws_xpixel > 0, ws.ws_ypixel > 0, ws.ws_col > 0, ws.ws_row > 0
+        else { return 0.5 }
+        return (Double(ws.ws_xpixel) / Double(ws.ws_col)) / (Double(ws.ws_ypixel) / Double(ws.ws_row))
+    }
 
     var size: (cols: Int, rows: Int) {
         var ws = winsize()
@@ -73,7 +83,10 @@ final class Terminal: @unchecked Sendable {
                 if let key = escapeSequence() { return key }
             case 0x03, 0x04: return .quit  // Ctrl-C, Ctrl-D
             case 0x0D, 0x0A: return .enter
+            case 0x09: return .tab
             case 0x7F, 0x08: return .backspace
+            // Letters arrive lower-case, so Caps Lock never changes what a key does.
+            case 0x41...0x5A: return .char(Character(UnicodeScalar(byte + 32)))
             case 0x20...0x7E: return .char(Character(UnicodeScalar(byte)))
             default: continue
             }
@@ -95,10 +108,21 @@ final class Terminal: @unchecked Sendable {
         if params.first == UInt8(ascii: "<") {
             // Mouse: ESC [ < button ; col ; row M (press) or m (release)
             let parts = String(decoding: params.dropFirst(), as: UTF8.self).split(separator: ";").compactMap { Int($0) }
-            guard final == UInt8(ascii: "M"), parts.count == 3, parts[0] == 0 else { return nil }
-            return .click(row: parts[2], col: parts[1])
+            guard final == UInt8(ascii: "M"), parts.count == 3 else { return nil }
+            switch parts[0] {
+            case 0: return .click(row: parts[2], col: parts[1])
+            case 64: return .scrollUp
+            case 65: return .scrollDown
+            default: return nil
+            }
         }
         switch final {
+        case UInt8(ascii: "~"):
+            switch String(decoding: params, as: UTF8.self) {
+            case "5": return .pageUp
+            case "6": return .pageDown
+            default: return nil
+            }
         case UInt8(ascii: "C"): return .right
         case UInt8(ascii: "D"): return .left
         case UInt8(ascii: "A"): return .up

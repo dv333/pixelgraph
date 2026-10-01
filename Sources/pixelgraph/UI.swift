@@ -1,4 +1,5 @@
 import CoreGraphics
+import ImageIO
 import Foundation
 
 /// The look shared by every PixelGraph screen: one calm palette, text that
@@ -156,6 +157,23 @@ final class UI: @unchecked Sendable {
         guard cols > 0, rows > 0 else { return "" }
         let key = url.path + (dim ? "|dim" : "")
         if sharp {
+            // iTerm2 draws an image from the left/top of its box; work out the
+            // photo's size in cells and centre the box on it instead.
+            var (row, col, cols, rows) = (row, col, cols, rows)
+            if let size = pixelSize(url) {
+                let aspect = Double(size.width) / Double(size.height)
+                let cell = term.cellAspect
+                let boxAspect = Double(cols) * cell / Double(rows)
+                if aspect < boxAspect {
+                    let fitted = max(1, min(cols, Int((Double(rows) * aspect / cell).rounded())))
+                    col += (cols - fitted) / 2
+                    cols = fitted
+                } else {
+                    let fitted = max(1, min(rows, Int((Double(cols) * cell / aspect).rounded())))
+                    row += (rows - fitted) / 2
+                    rows = fitted
+                }
+            }
             if jpegs[key] == nil {
                 if !dim, large, let data = try? Data(contentsOf: url) {
                     jpegs[key] = data
@@ -174,6 +192,20 @@ final class UI: @unchecked Sendable {
             blocks[blockKey] = TerminalImage.blocks(source, cols: cols, rows: rows, dim: dim)
         }
         return blocks[blockKey]!.enumerated().map { at(row + $0.offset, col) + $0.element }.joined()
+    }
+
+    private var sizes: [String: (width: Int, height: Int)] = [:]
+
+    /// A photo file's pixel size, upright.
+    private func pixelSize(_ url: URL) -> (width: Int, height: Int)? {
+        if let known = sizes[url.path] { return known }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              var w = props[kCGImagePropertyPixelWidth] as? Int, var h = props[kCGImagePropertyPixelHeight] as? Int,
+              w > 0, h > 0 else { return nil }
+        if let orientation = props[kCGImagePropertyOrientation] as? Int, orientation >= 5 { swap(&w, &h) }
+        sizes[url.path] = (w, h)
+        return (w, h)
     }
 
     private func picture(_ url: URL, maxSide: Int) -> CGImage? {

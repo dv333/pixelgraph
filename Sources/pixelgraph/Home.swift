@@ -147,7 +147,7 @@ final class App {
         case .quit, .char("q"): return .quit
         case .up: move(-1)
         case .down: move(1)
-        case .enter, .right: return activate(rows[selected], opening: key == .right)
+        case .enter, .right, .char(" "): return activate(rows[selected], opening: key == .right)
         case .left, .escape, .backspace: back()
         case .click(let row, _):
             let index = row - 4 + scroll

@@ -42,9 +42,23 @@ pixelgraph undo                              # put back the last move
 
 Every photo is **Keep** or **Move**. The best shot in each group is kept (★); everything else starts selected to move, with the reason shown — "blurrier", "near-exact copy", "eyes closed". Most of the time you only confirm.
 
-- **Groups:** arrows to move, Enter or click to open, Space to keep or move a whole group, `v` for filmstrips.
-- **Inside a group:** Space switches a photo between Keep and Move, `b` marks another best, `r` gives a reason, Enter or click to enlarge, ← → to compare.
-- **`m` moves** the selection after you confirm. **`u` undoes** the last move.
+One key means one thing on every screen, and keys set a state rather than toggling it, so pressing twice can't undo what you meant:
+
+| Key | Does |
+|---|---|
+| ← → ↑ ↓ | move around (mouse wheel and Page Up/Down scroll the groups) |
+| Space | look closer, like Quick Look · again to go back |
+| Enter | open · confirm |
+| Esc | back · cancel — never changes anything |
+| K | keep this photo (on a group: keep them all) |
+| X | move this photo (on a group: all but the best) |
+| B | make it the best ★ |
+| R | say why it's moving |
+| C | compare two photos side by side: ← → change the candidate, ↑ pins it |
+| M | move the selection to Duplicates — always asks first |
+| U | undo the last change or move |
+| ? | all the keys |
+| Q | quit — everything is saved as you go |
 
 In iTerm2 photos are shown as real images; other true-colour terminals get colour-block previews.
 
