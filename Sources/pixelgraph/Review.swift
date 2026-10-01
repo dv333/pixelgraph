@@ -281,7 +281,26 @@ final class ReviewSession {
         run.groups[g].pick.decidedBy = "you"
         history.append(.mark(group: g, before: before))
         dirty = true
+        noteChanges(in: g, from: before)
         if let message { toast = message + ui.dim(" · ") + ui.blue("u") + ui.dim(" undo") }
+    }
+
+    /// Records which cards or tiles a change touched, so only those repaint.
+    private func noteChanges(in g: Int, from before: Pick) {
+        if screen == .groups {
+            changed.insert(g)
+            return
+        }
+        let after = run.groups[g].pick
+        for (index, member) in order.enumerated() {
+            let id = member.id
+            // Your first change also rewords every "Keep" caption to "you chose".
+            let reworded = before.decidedBy != "you" && after.isKept(id) && !after.keepers.contains(id)
+            if reworded || before.keepers.contains(id) != after.keepers.contains(id) || before.isKept(id) != after.isKept(id)
+                || before.reasons[id] != after.reasons[id] {
+                changed.insert(index)
+            }
+        }
     }
 
     private func name(_ id: String) -> String {
@@ -359,6 +378,7 @@ final class ReviewSession {
             run.markMoved(ids)
             history.append(.move(ids))
             dirty = true
+            needsFull = true
             save()
             toast = ui.green("✓") + " Moved \(ids.count) photo\(ids.count == 1 ? "" : "s") to Duplicates · " + ui.blue("u") + ui.dim(" undo")
         } catch {
@@ -373,6 +393,7 @@ final class ReviewSession {
             history.removeLast()
             run.groups[g].pick = before
             dirty = true
+            needsFull = true
             toast = ui.green("✓") + " Undone"
             return
         }
@@ -385,6 +406,7 @@ final class ReviewSession {
             try await Mover.undoLast()
             run.unmark(last.ids)
             dirty = true
+            needsFull = true
             save()
             toast = ui.green("✓") + " Put back \(last.ids.count) photo\(last.ids.count == 1 ? "" : "s")"
         } catch {
@@ -394,16 +416,56 @@ final class ReviewSession {
 
     // MARK: - Drawing
 
-    private func draw() {
-        hits = []
-        var out = ui.clear()
+    /// What the last full frame showed, apart from the selection.
+    private var drawnFrame: String?
+    /// The selected card or tile when the screen was last drawn.
+    private var drawnSelection = -1
+    /// Cards or tiles whose content changed since the last draw.
+    private var changed: Set<Int> = []
+    /// Set when many things change at once (a move, an undo).
+    private var needsFull = true
+
+    /// Everything that, if different, means the whole screen must be redrawn.
+    private func frameKey() -> String {
+        let s: String
         switch screen {
-        case .groups: out += overview == .mosaic ? mosaic() : filmstrip()
-        case .group: out += groupGrid()
-        case .photo: out += photoView()
-        case .compare: out += compareView()
+        case .groups: s = "groups \(overview) \(scroll)"
+        case .group: s = "group \(groupIndex)"
+        case .photo: s = "photo \(groupIndex) \(cursor)"
+        case .compare: s = "compare \(groupIndex) \(pinned) \(cursor)"
         }
-        if let toast { out += ui.at(ui.rows - 1, 2) + "\u{1B}[2K" + ui.center(toast, width: ui.cols - 2) }
+        return "\(s) \(ui.cols)x\(ui.rows) \(sheet == nil)"
+    }
+
+    private var selection: Int { screen == .groups ? groupIndex : cursor }
+
+    /// Redraws only what changed when the screen is otherwise the same:
+    /// moving the selection repaints two frames, marking a photo repaints its
+    /// tile. Everything else repaints the whole screen.
+    private func draw() {
+        if screen == .groups { keepSelectionVisible() }
+        let key = frameKey()
+        let partial = !needsFull && sheet == nil && key == drawnFrame && (screen == .groups || screen == .group)
+        var out: String
+        if partial {
+            out = ""
+            for index in changed.union([drawnSelection, selection]) {
+                out += item(index, content: changed.contains(index))
+            }
+            let (first, last) = currentRange()
+            out += screen == .groups ? overviewHeader(range: range(first: first, shown: last - first)) : groupHeader()
+            out += footer()
+        } else {
+            hits = []
+            out = ui.clear()
+            switch screen {
+            case .groups: out += overview == .mosaic ? mosaic() : filmstrip()
+            case .group: out += groupGrid()
+            case .photo: out += photoView()
+            case .compare: out += compareView()
+            }
+        }
+        out += toastLine()
         switch sheet {
         case .reason: out += reasonSheet()
         case .confirm(let ids): out += confirmSheet(ids)
@@ -411,6 +473,48 @@ final class ReviewSession {
         case nil: break
         }
         ui.term.write(out)
+        drawnFrame = key
+        drawnSelection = selection
+        changed = []
+        needsFull = false
+    }
+
+    /// The row above the action bar: a message if there is one, otherwise
+    /// what normally lives there.
+    private func toastLine() -> String {
+        let row = ui.rows - 1
+        if let toast { return ui.at(row, 1) + "\u{1B}[2K " + ui.center(toast, width: ui.cols - 2) }
+        if screen == .group { return ui.at(row, 1) + "\u{1B}[2K" }
+        guard screen == .groups else { return "" }
+        return ui.at(row, 1) + "\u{1B}[2K" + moreIndicator(after: currentRange().last)
+    }
+
+    /// One card (overview) or tile (group): just its frame and labels when
+    /// only the selection moved, everything when its photos' marks changed.
+    private func item(_ index: Int, content: Bool) -> String {
+        switch screen {
+        case .groups:
+            guard (currentRange().first..<currentRange().last).contains(index) else { return "" }
+            return overview == .mosaic ? mosaicCard(index, layout: mosaicLayout(), content: content)
+                : filmstripRow(index, content: content)
+        case .group:
+            let layout = GroupLayout(count: order.count, cols: ui.cols, rows: ui.rows)
+            guard index >= 0, index < min(order.count, layout.visible) else { return "" }
+            return groupTile(index, layout: layout, content: content)
+        default: return ""
+        }
+    }
+
+    private func footer() -> String {
+        switch screen {
+        case .groups:
+            return ui.actionBar(hints: "space open · k keep group · x move rest · m move · u undo · ? keys",
+                                short: "space open · ? keys", action: moveButton(run.toMove.count))
+        default:
+            let moving = group.photos.map(\.id).filter { pick.willMove($0) }.count
+            return ui.actionBar(hints: "space look · k keep · x move · b best · c compare · u undo · esc back · ? keys",
+                                short: "k keep · x move · ? keys", action: moveButton(moving, label: "Move \(moving)"))
+        }
     }
 
     private func moveButton(_ count: Int, label: String = "Move to Duplicates") -> String {
@@ -495,30 +599,64 @@ final class ReviewSession {
         guard remaining > 0 else { return "" }
         let text = "▼ \(remaining) more · scroll or page down"
         let col = max(2, (ui.cols - text.count) / 2)
-        hits.append((ui.rows - 1...ui.rows - 1, col...(col + text.count), .more))
+        if !hits.contains(where: { if case .more = $0.hit { return true } else { return false } }) {
+            hits.append((ui.rows - 1...ui.rows - 1, col...(col + text.count), .more))
+        }
         return ui.at(ui.rows - 1, col) + ui.blue(text)
+    }
+
+    /// Scrolls just enough to keep the selected group on screen.
+    private func keepSelectionVisible() {
+        if overview == .mosaic {
+            let layout = mosaicLayout()
+            let row = groupIndex / layout.perRow
+            if row < scroll { scroll = row }
+            if row >= scroll + layout.visibleRows { scroll = row - layout.visibleRows + 1 }
+        } else {
+            if groupIndex < scroll { scroll = groupIndex }
+            if groupIndex >= scroll + filmstripVisible { scroll = groupIndex - filmstripVisible + 1 }
+        }
+    }
+
+    /// The groups on screen.
+    private func currentRange() -> (first: Int, last: Int) {
+        if overview == .mosaic {
+            let layout = mosaicLayout()
+            let first = scroll * layout.perRow
+            return (first, min(run.groups.count, first + layout.visibleRows * layout.perRow))
+        }
+        return (scroll, min(run.groups.count, scroll + filmstripVisible))
     }
 
     private func mosaic() -> String {
         let layout = mosaicLayout()
-        let selectedRow = groupIndex / layout.perRow
-        if selectedRow < scroll { scroll = selectedRow }
-        if selectedRow >= scroll + layout.visibleRows { scroll = selectedRow - layout.visibleRows + 1 }
-
-        let first = scroll * layout.perRow
-        let last = min(run.groups.count, first + layout.visibleRows * layout.perRow)
+        let (first, last) = currentRange()
         var out = overviewHeader(range: range(first: first, shown: last - first))
-        let inner = layout.cardWidth - 2
-        let coverWidth = inner * 2 / 3
-        let sideWidth = inner - coverWidth - 1
         for index in first..<last {
-            let g = run.groups[index]
-            let r = 3 + (index / layout.perRow - scroll) * (layout.imageRows + 5)
-            let c = 2 + (index % layout.perRow) * (layout.cardWidth + 3)
-            let selected = index == groupIndex
-            out += ui.box(row: r, col: c, width: layout.cardWidth, height: layout.imageRows + 2,
-                          paint: { [ui] in selected ? ui.blue($0) : ui.gray($0) }, heavy: selected)
+            out += mosaicCard(index, layout: layout, content: true)
+            let (r, c) = mosaicOrigin(index, layout)
+            hits.append((r...(r + layout.imageRows + 3), c...(c + layout.cardWidth - 1), .group(index)))
+        }
+        return out + footer()
+    }
 
+    private func mosaicOrigin(_ index: Int, _ layout: MosaicLayout) -> (row: Int, col: Int) {
+        (3 + (index / layout.perRow - scroll) * (layout.imageRows + 5), 2 + (index % layout.perRow) * (layout.cardWidth + 3))
+    }
+
+    /// A group card: frame and the two lines under it, plus the photos when
+    /// `content` is set.
+    private func mosaicCard(_ index: Int, layout: MosaicLayout, content: Bool) -> String {
+        let g = run.groups[index]
+        let (r, c) = mosaicOrigin(index, layout)
+        let selected = index == groupIndex
+        var out = ui.box(row: r, col: c, width: layout.cardWidth, height: layout.imageRows + 2,
+                         paint: { [ui] in selected ? ui.blue($0) : ui.gray($0) }, heavy: selected)
+        if content {
+            let inner = layout.cardWidth - 2
+            let coverWidth = inner * 2 / 3
+            let sideWidth = inner - coverWidth - 1
+            out += blank(row: r + 1, col: c + 1, cols: inner, rows: layout.imageRows)
             let shown = Run.displayOrder(g)
             if let url = thumb(shown[0]) {
                 out += ui.image(url, row: r + 1, col: c + 1, cols: coverWidth, rows: layout.imageRows, dim: !g.pick.isKept(shown[0].id))
@@ -536,65 +674,86 @@ final class ReviewSession {
                     }
                 }
             }
-            out += ui.at(r + layout.imageRows + 2, c) + ui.clip(cardTitle(g, selected: selected), layout.cardWidth)
-            out += ui.at(r + layout.imageRows + 3, c) + ui.clip(cardCounts(g), layout.cardWidth)
-            hits.append((r...(r + layout.imageRows + 3), c...(c + layout.cardWidth - 1), .group(index)))
         }
-        return out + moreIndicator(after: last) + ui.actionBar(
-            hints: "space open · k keep group · x move rest · m move · u undo · ? keys",
-            short: "space open · ? keys", action: moveButton(run.toMove.count))
+        out += ui.at(r + layout.imageRows + 2, c) + pad(cardTitle(g, selected: selected), layout.cardWidth)
+        out += ui.at(r + layout.imageRows + 3, c) + pad(cardCounts(g), layout.cardWidth)
+        return out
+    }
+
+    /// Spaces over an area, so a redrawn item never shows leftovers.
+    private func blank(row: Int, col: Int, cols: Int, rows: Int) -> String {
+        let spaces = String(repeating: " ", count: max(0, cols))
+        return (0..<max(0, rows)).map { ui.at(row + $0, col) + spaces }.joined()
+    }
+
+    /// Styled text cut or padded to exactly `width` cells.
+    private func pad(_ styled: String, _ width: Int) -> String {
+        let text = ui.clip(styled, width)
+        return text + "\u{1B}[0m" + String(repeating: " ", count: max(0, width - ui.visibleWidth(text)))
     }
 
     // Overview B: one row per group, every photo visible.
-    private func filmstrip() -> String {
-        let (cols, rows) = (ui.cols, ui.rows)
-        let thumbRows = rows >= 40 ? 5 : 4
+    private struct FilmstripLayout {
+        var thumbRows: Int, thumbWidth: Int, stacked: Bool, rowHeight: Int, labelWidth: Int, fits: Int
+    }
+
+    private func filmstripLayout() -> FilmstripLayout {
+        let thumbRows = ui.rows >= 40 ? 5 : 4
         let thumbWidth = thumbRows * 8 / 3
-        let stacked = cols < 64
-        let rowHeight = thumbRows + (stacked ? 3 : 2)
-        let visible = filmstripVisible
-        if groupIndex < scroll { scroll = groupIndex }
-        if groupIndex >= scroll + visible { scroll = groupIndex - visible + 1 }
-
+        let stacked = ui.cols < 64
         let labelWidth = stacked ? 0 : 26
-        let fits = max(1, (cols - labelWidth - 4) / (thumbWidth + 1))
-        let last = min(run.groups.count, scroll + visible)
-        var out = overviewHeader(range: range(first: scroll, shown: last - scroll))
-        for index in scroll..<last {
-            let g = run.groups[index]
-            let r = 3 + (index - scroll) * rowHeight
-            let selected = index == groupIndex
-            if stacked {
-                out += ui.at(r, 3) + ui.clip(cardTitle(g, selected: selected) + "  " + cardCounts(g), cols - 3)
-            } else {
-                out += ui.at(r, 3) + ui.clip(cardTitle(g, selected: selected), labelWidth - 1)
-                out += ui.at(r + 1, 3) + ui.clip(cardCounts(g), labelWidth - 1)
-                out += ui.at(r + 2, 3) + ui.dim("\(g.photos.count) photos")
-            }
-            let strip = stacked ? r + 1 : r
-            if selected { for y in 0..<(strip - r + thumbRows) { out += ui.at(r + y, 1) + ui.blue("▌") } }
+        return FilmstripLayout(thumbRows: thumbRows, thumbWidth: thumbWidth, stacked: stacked,
+                               rowHeight: thumbRows + (stacked ? 3 : 2), labelWidth: labelWidth,
+                               fits: max(1, (ui.cols - labelWidth - 4) / (thumbWidth + 1)))
+    }
 
-            let shown = Run.displayOrder(g)
-            for (k, member) in shown.prefix(fits).enumerated() {
-                let c = 3 + labelWidth + k * (thumbWidth + 1)
-                if fits > 1, k == fits - 1, shown.count > fits {
-                    out += ui.at(strip + thumbRows / 2, c + 3) + ui.bold("+\(shown.count - fits + 1)")
-                    break
-                }
-                let kept = g.pick.isKept(member.id)
-                if let url = thumb(member) {
-                    out += ui.image(url, row: strip, col: c, cols: thumbWidth, rows: thumbRows, dim: !kept)
-                }
-                // A rule under each: green best, white kept, blue moving.
-                let rule = String(repeating: "▔", count: thumbWidth)
-                out += ui.at(strip + thumbRows, c)
-                    + (g.pick.keepers.contains(member.id) ? ui.green(rule) : kept ? rule : g.pick.moved.contains(member.id) ? ui.gray(rule) : ui.blue(rule))
-            }
-            hits.append((r...(strip + thumbRows), 1...cols, .group(index)))
+    private func filmstrip() -> String {
+        let layout = filmstripLayout()
+        let (first, last) = currentRange()
+        var out = overviewHeader(range: range(first: first, shown: last - first))
+        for index in first..<last {
+            out += filmstripRow(index, content: true)
+            let r = 3 + (index - scroll) * layout.rowHeight
+            hits.append((r...(r + layout.rowHeight - 2), 1...ui.cols, .group(index)))
         }
-        return out + moreIndicator(after: last) + ui.actionBar(
-            hints: "space open · k keep group · x move rest · m move · u undo · ? keys",
-            short: "space open · ? keys", action: moveButton(run.toMove.count))
+        return out + footer()
+    }
+
+    private func filmstripRow(_ index: Int, content: Bool) -> String {
+        let layout = filmstripLayout()
+        let g = run.groups[index]
+        let r = 3 + (index - scroll) * layout.rowHeight
+        let selected = index == groupIndex
+        var out = ""
+        if layout.stacked {
+            out += ui.at(r, 3) + pad(cardTitle(g, selected: selected) + "  " + cardCounts(g), ui.cols - 3)
+        } else {
+            out += ui.at(r, 3) + pad(cardTitle(g, selected: selected), layout.labelWidth - 1)
+            out += ui.at(r + 1, 3) + pad(cardCounts(g), layout.labelWidth - 1)
+            out += ui.at(r + 2, 3) + pad(ui.dim("\(g.photos.count) photos"), layout.labelWidth - 1)
+        }
+        let strip = layout.stacked ? r + 1 : r
+        for y in 0..<(strip - r + layout.thumbRows) { out += ui.at(r + y, 1) + (selected ? ui.blue("▌") : " ") }
+        guard content else { return out }
+
+        let shown = Run.displayOrder(g)
+        out += blank(row: strip, col: 3 + layout.labelWidth, cols: ui.cols - 3 - layout.labelWidth, rows: layout.thumbRows + 1)
+        for (k, member) in shown.prefix(layout.fits).enumerated() {
+            let c = 3 + layout.labelWidth + k * (layout.thumbWidth + 1)
+            if layout.fits > 1, k == layout.fits - 1, shown.count > layout.fits {
+                out += ui.at(strip + layout.thumbRows / 2, c + 3) + ui.bold("+\(shown.count - layout.fits + 1)")
+                break
+            }
+            let kept = g.pick.isKept(member.id)
+            if let url = thumb(member) {
+                out += ui.image(url, row: strip, col: c, cols: layout.thumbWidth, rows: layout.thumbRows, dim: !kept)
+            }
+            // A rule under each: green best, white kept, blue moving.
+            let rule = String(repeating: "▔", count: layout.thumbWidth)
+            out += ui.at(strip + layout.thumbRows, c)
+                + (g.pick.keepers.contains(member.id) ? ui.green(rule) : kept ? rule : g.pick.moved.contains(member.id) ? ui.gray(rule) : ui.blue(rule))
+        }
+        return out
     }
 
     /// Photo tiles for one group, as large as the window allows while
@@ -657,41 +816,53 @@ final class ReviewSession {
         }
     }
 
-    private func groupGrid() -> String {
-        let (cols, rows) = (ui.cols, ui.rows)
-        let n = order.count
-        let layout = GroupLayout(count: n, cols: cols, rows: rows)
-        let moving = group.photos.map(\.id).filter { pick.willMove($0) }.count
+    private func groupHeader() -> String {
         var header = ui.bold(Format.day.string(from: group.photos[0].date)) + ui.dim(" · ")
-            + ui.blue(group.kind.title) + ui.dim(" · \(n) photos · group \(groupIndex + 1) of \(run.groups.count)")
+            + ui.blue(group.kind.title) + ui.dim(" · \(order.count) photos · group \(groupIndex + 1) of \(run.groups.count)")
         if pick.decidedBy == "apple-model" { header += ui.dim("  ✦ close call, picked by Apple Intelligence") }
-        var out = ui.at(1, 2) + ui.clip(header, cols - 2)
+        return ui.at(1, 1) + "\u{1B}[2K " + ui.clip(header, ui.cols - 2)
+    }
 
+    private func groupGrid() -> String {
+        let n = order.count
+        let layout = GroupLayout(count: n, cols: ui.cols, rows: ui.rows)
+        var out = groupHeader()
         for index in 0..<min(n, layout.visible) {
-            let member = order[index]
-            let s = state(member.id)
-            let r = 3 + (index / layout.perRow) * (layout.imageRows + 6)
-            let c = 2 + (index % layout.perRow) * (layout.tileWidth + 2)
-            let ui = self.ui, focused = index == cursor
-            let paint: (String) -> String = { focused ? ui.blue($0) : s == .best ? ui.green($0) : ui.gray($0) }
-            out += ui.box(row: r, col: c, width: layout.tileWidth, height: layout.imageRows + 2,
-                          label: label(s, number: index + 1), paint: paint, heavy: index == cursor)
-            if let url = thumb(member) {
-                out += ui.image(url, row: r + 1, col: c + 1, cols: layout.tileWidth - 2, rows: layout.imageRows,
-                                dim: s == .move || s == .moved)
-            }
-            for (k, line) in caption(member.id, s, width: layout.tileWidth).prefix(2).enumerated() {
-                out += ui.at(r + layout.imageRows + 2 + k, c) + line
-            }
-            out += ui.at(r + layout.imageRows + 4, c) + ui.dim(ui.fit(meta(member, short: true), layout.tileWidth))
+            out += groupTile(index, layout: layout, content: true)
+            let (r, c) = tileOrigin(index, layout)
             hits.append((r...(r + layout.imageRows + 1), c...(c + layout.tileWidth - 1), .photo(index)))
         }
         if layout.visible < n {
-            out += ui.at(rows - 2, 2) + ui.dim(ui.fit("+\(n - layout.visible) more: enlarge any photo and use → to reach them", cols - 2))
+            out += ui.at(ui.rows - 2, 2) + ui.dim(ui.fit("+\(n - layout.visible) more: enlarge any photo and use → to reach them", ui.cols - 2))
         }
-        return out + ui.actionBar(
-            hints: "space look · k keep · x move · b best · c compare · u undo · esc back · ? keys",
-            short: "k keep · x move · ? keys", action: moveButton(moving, label: "Move \(moving)"))
+        return out + footer()
+    }
+
+    private func tileOrigin(_ index: Int, _ layout: GroupLayout) -> (row: Int, col: Int) {
+        (3 + (index / layout.perRow) * (layout.imageRows + 6), 2 + (index % layout.perRow) * (layout.tileWidth + 2))
+    }
+
+    /// A photo tile: frame with its label, plus the photo and captions when
+    /// `content` is set (its marks changed).
+    private func groupTile(_ index: Int, layout: GroupLayout, content: Bool) -> String {
+        let member = order[index]
+        let s = state(member.id)
+        let (r, c) = tileOrigin(index, layout)
+        let ui = self.ui, focused = index == cursor
+        let paint: (String) -> String = { focused ? ui.blue($0) : s == .best ? ui.green($0) : ui.gray($0) }
+        var out = ui.box(row: r, col: c, width: layout.tileWidth, height: layout.imageRows + 2,
+                         label: label(s, number: index + 1), paint: paint, heavy: focused)
+        guard content else { return out }
+        if let url = thumb(member) {
+            out += ui.image(url, row: r + 1, col: c + 1, cols: layout.tileWidth - 2, rows: layout.imageRows,
+                            dim: s == .move || s == .moved)
+        }
+        let lines = caption(member.id, s, width: layout.tileWidth)
+        for k in 0..<2 {
+            out += ui.at(r + layout.imageRows + 2 + k, c) + pad(k < lines.count ? lines[k] : "", layout.tileWidth)
+        }
+        out += ui.at(r + layout.imageRows + 4, c) + pad(ui.dim(meta(member, short: true)), layout.tileWidth)
+        return out
     }
 
     private func photoView() -> String {

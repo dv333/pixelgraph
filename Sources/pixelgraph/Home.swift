@@ -283,43 +283,64 @@ final class App {
 
     // MARK: - Drawing
 
-    private func draw() {
-        let (cols, height) = (ui.cols, ui.rows)
-        var out = ui.clear()
-        let title: String
-        switch screen {
-        case .home: title = ui.bold("PixelGraph") + ui.dim("  ·  find near-identical photos and keep the best")
-        case .months: title = ui.bold("Photos library") + ui.dim("  ·  choose a month")
-        case .browser(let url): title = ui.bold(url.lastPathComponent) + ui.dim("  ·  " + url.deletingLastPathComponent().path)
-        }
-        out += ui.at(2, 3) + ui.clip(title, cols - 4)
+    /// What the last full frame showed, apart from the selection.
+    private var drawnFrame: String?
+    private var drawnSelected = -1
+    private let listTop = 4
 
-        let listTop = 4
-        let visible = max(1, height - listTop - 3)
+    /// Moving the selection repaints just the two rows involved and the
+    /// action bar; anything else repaints the screen.
+    private func draw() {
+        let visible = max(1, ui.rows - listTop - 3)
         if selected < scroll { scroll = selected }
         if selected >= scroll + visible { scroll = selected - visible + 1 }
-        for (offset, index) in rows.indices.dropFirst(scroll).prefix(visible).enumerated() {
-            let line = render(rows[index], width: cols - 6)
-            let r = listTop + offset
-            if index == selected {
-                out += ui.at(r, 2) + ui.blue("›") + " " + ui.highlight(line, width: cols - 5)
-            } else {
-                out += ui.at(r, 4) + line
+        let key = "\(screen) \(scroll) \(rows.count) \(ui.cols)x\(ui.rows) \(prompt ?? "-") \(message ?? "-")"
+
+        var out: String
+        if key == drawnFrame, prompt == nil {
+            out = rowLine(drawnSelected) + rowLine(selected)
+        } else {
+            out = ui.clear()
+            let title: String
+            switch screen {
+            case .home: title = ui.bold("PixelGraph") + ui.dim("  ·  find near-identical photos and keep the best")
+            case .months: title = ui.bold("Photos library") + ui.dim("  ·  choose a month")
+            case .browser(let url): title = ui.bold(url.lastPathComponent) + ui.dim("  ·  " + url.deletingLastPathComponent().path)
+            }
+            out += ui.at(2, 3) + ui.clip(title, ui.cols - 4)
+            for index in rows.indices.dropFirst(scroll).prefix(visible) { out += rowLine(index) }
+            if let message { out += ui.at(ui.rows - 2, 3) + ui.clip(message, ui.cols - 4) }
+            if let prompt {
+                out += ui.sheet([
+                    ui.bold("Choose a folder"),
+                    ui.dim("Type or paste a path, or drag a folder here from Finder."),
+                    "",
+                    ui.blue("› ") + prompt + "▏",
+                    "",
+                    ui.dim("enter open · esc cancel"),
+                ], width: 70)
             }
         }
+        out += actionBar()
+        ui.term.write(out)
+        drawnFrame = key
+        drawnSelected = selected
+    }
 
-        if let message { out += ui.at(height - 2, 3) + ui.clip(message, cols - 4) }
-        if let prompt {
-            out += ui.sheet([
-                ui.bold("Choose a folder"),
-                ui.dim("Type or paste a path, or drag a folder here from Finder."),
-                "",
-                ui.blue("› ") + prompt + "▏",
-                "",
-                ui.dim("enter open · esc cancel"),
-            ], width: 70)
+    /// One list row, highlighted when selected, covering the full width so
+    /// a previous highlight never shows through.
+    private func rowLine(_ index: Int) -> String {
+        guard rows.indices.contains(index) else { return "" }
+        let r = listTop + index - scroll
+        guard r >= listTop, r < ui.rows - 2 else { return "" }
+        let line = render(rows[index], width: ui.cols - 6)
+        if index == selected {
+            return ui.at(r, 1) + "\u{1B}[2K" + ui.at(r, 2) + ui.blue("›") + " " + ui.highlight(line, width: ui.cols - 5)
         }
+        return ui.at(r, 1) + "\u{1B}[2K" + ui.at(r, 4) + line
+    }
 
+    private func actionBar() -> String {
         let action: String
         switch rows.indices.contains(selected) ? rows[selected] : .choose {
         case .source(let source, _), .month(let source, _): action = ui.button("Scan \(ui.fit(source.description, 28))")
@@ -330,9 +351,8 @@ final class App {
         let backHint = screen == .home ? "" : " · ← back"
         let scanHint: String
         if case .browser = screen { scanHint = " · s scan this folder" } else { scanHint = "" }
-        out += ui.actionBar(hints: "↑↓ choose · enter \(screen == .home ? "scan" : "open")\(scanHint)\(backHint) · q quit",
+        return ui.actionBar(hints: "↑↓ choose · enter \(screen == .home ? "scan" : "open")\(scanHint)\(backHint) · q quit",
                             short: "↑↓ · enter\(backHint) · q", action: action)
-        ui.term.write(out)
     }
 
     private func render(_ row: Row, width: Int) -> String {
