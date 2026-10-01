@@ -42,6 +42,8 @@ final class App {
     private var ticked: Set<Date> = []
     private var anchor: Date?
     private var monthCounts: [Date: Int] = [:]
+    /// q was pressed: "Quit PixelGraph?" is showing.
+    private var confirmingQuit = false
     /// Esc was pressed once with months ticked; a second Esc drops them.
     private var discardArmed = false
     /// The unfinished review a new scan would replace, shown as a warning.
@@ -69,6 +71,15 @@ final class App {
                 draw()
                 continue
             }
+            if confirmingQuit {
+                switch key {
+                case .enter, .char("y"), .char("q"), .quit: return
+                case .escape, .backspace, .char("n"), .click: confirmingQuit = false
+                default: break
+                }
+                draw()
+                continue
+            }
             if let source = choosing {
                 switch key {
                 case .up, .down: taskCursor = 1 - taskCursor
@@ -81,14 +92,14 @@ final class App {
                 case .escape, .backspace:
                     choosing = nil
                     replacing = nil
-                case .quit, .char("q"): return
+                case .quit, .char("q"): confirmingQuit = true
                 default: break
                 }
             } else if prompt != nil {
                 if let source = editPrompt(key) { choose(source) }
             } else if let action = handle(key) {
                 switch action {
-                case .quit: return
+                case .quit: confirmingQuit = true
                 case .scan(let source):
                     choose(source)
                 case .resume:
@@ -451,10 +462,10 @@ final class App {
         let visible = max(1, ui.rows - listTop - 3)
         if selected < scroll { scroll = selected }
         if selected >= scroll + visible { scroll = selected - visible + 1 }
-        let key = "\(screen) \(scroll) \(rows.count) \(ui.cols)x\(ui.rows) \(prompt ?? "-") \(message ?? "-") \(choosing != nil) \(taskCursor) \(options.documents) \(options.describe) \(ticked.count)"
+        let key = "\(screen) \(scroll) \(rows.count) \(ui.cols)x\(ui.rows) \(prompt ?? "-") \(message ?? "-") \(choosing != nil) \(taskCursor) \(options.documents) \(options.describe) \(ticked.count) \(confirmingQuit)"
 
         var out: String
-        if key == drawnFrame, prompt == nil, choosing == nil {
+        if key == drawnFrame, prompt == nil, choosing == nil, !confirmingQuit {
             out = rowLine(drawnSelected) + rowLine(selected)
         } else {
             out = ui.clear()
@@ -487,6 +498,13 @@ final class App {
                 ] } ?? []) + [
                     ui.dim("↑↓ choose · space tick · enter start · esc back"),
                 ], width: 82)
+            }
+            if confirmingQuit {
+                let width = min(ui.cols - 2, 64) - 4
+                out += ui.sheet([ui.bold("Quit PixelGraph?"), ""]
+                    + ui.wrap("Your scans and choices are saved; run pixelgraph again to pick up where you left off.",
+                              width: width, lines: 3).map { ui.dim($0) }
+                    + ["", ui.spread("", ui.dim("esc Stay   ") + ui.button("enter Quit"), width: width)], width: 68)
             }
             if let prompt {
                 out += ui.sheet([

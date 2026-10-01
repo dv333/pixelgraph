@@ -63,7 +63,7 @@ One key means one thing on every screen, and keys set a state rather than toggli
 | Tab | switch between Duplicates, Documents and Junk |
 | U | undo the last change or move |
 | ? | all the keys |
-| Q | quit — asks first; everything is saved as you go |
+| Q | quit — asks first, here and on the start screen; everything is saved as you go |
 
 In iTerm2 photos are shown as real images; other true-colour terminals get colour-block previews.
 
