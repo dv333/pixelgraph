@@ -3,7 +3,8 @@ import Foundation
 /// Moves photos to Duplicates or PGDocuments, and back.
 ///
 /// Apple Photos: into the "PixelGraph Duplicates" album and out of the album
-/// that was scanned; nothing leaves the library. Folders and drives: into a
+/// that was scanned. Duplicates from a library scan (no album to take them
+/// out of) are also deleted, to Recently Deleted. Folders and drives: into a
 /// "PixelGraph Duplicates" folder inside the scanned folder, keeping the
 /// layout, with RAW twins and sidecars alongside. Every move is logged so the
 /// last one can be undone.
@@ -26,6 +27,10 @@ enum Mover {
         var ids: [String]
         /// For folders: where each file went.
         var files: [FileMove]
+        /// Deleted from the library (to Recently Deleted), so undo can't put them back.
+        var deleted: Bool?
+        /// Still in the scanned album, because it can't be changed.
+        var leftInSource: Bool?
     }
 
     struct FileMove: Codable {
@@ -40,9 +45,13 @@ enum Mover {
         var record = Record(date: .now, source: source, destination: target, batch: batch, ids: ids, files: [])
         switch source {
         case .album(let id, _):
-            try await Library.move(ids, to: target.album, from: id)
+            let removed = try await Library.move(ids, to: target.album, from: id)
+            if !removed { record.leftInSource = true }
         case .dates:
-            try await Library.move(ids, to: target.album, from: nil)
+            // Documents are the copies being kept, so only duplicates are deleted.
+            let delete = target == .duplicates
+            try await Library.move(ids, to: target.album, from: nil, delete: delete)
+            if delete { record.deleted = true }
         case .folder(let path):
             // Resolve symlinks (/var → /private/var) so paths line up.
             let root = URL(fileURLWithPath: path).resolvingSymlinksInPath()
@@ -65,14 +74,21 @@ enum Mover {
     }
 
     /// Undoes the most recent move (all of it, if it went to two places).
-    /// Returns the photo ids put back, or nil when there's nothing to undo.
+    /// Returns the photo ids put back and those that were deleted, which only
+    /// Photos can recover; nil when there's nothing to undo.
     @discardableResult
-    static func undoLast() async throws -> (source: Source, ids: [String])? {
+    static func undoLast() async throws -> (source: Source, ids: [String], deleted: [String])? {
         var records = history()
         guard let last = records.last else { return nil }
         var undone: [String] = []
+        var deleted: [String] = []
         while let record = records.last, record.batch == last.batch, record.batch != nil || record.date == last.date {
             records.removeLast()
+            if record.deleted == true {
+                deleted += record.ids
+                try save(records)
+                continue
+            }
             let destination = record.destination ?? .duplicates
             switch record.source {
             case .album(let id, _): try await Library.restore(record.ids, from: destination.album, to: id)
@@ -88,7 +104,7 @@ enum Mover {
             undone += record.ids
             try save(records)
         }
-        return (last.source, undone)
+        return (last.source, undone, deleted)
     }
 
     static func history() -> [Record] {

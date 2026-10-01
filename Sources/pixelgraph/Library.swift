@@ -103,18 +103,47 @@ enum Library {
     static let documentsAlbum = "PGDocuments"
 
     /// Adds photos to the album called `destination` (creating it if needed)
-    /// and takes them out of `album`. Nothing leaves the library.
-    static func move(_ ids: [String], to destination: String, from album: String?) async throws {
+    /// and takes them out of `album`. With `delete`, also deletes them from
+    /// the library: they go to Recently Deleted, and macOS asks first.
+    /// Returns false when `album` can't be changed, so they're still in it.
+    @discardableResult
+    static func move(_ ids: [String], to destination: String, from album: String?, delete: Bool = false) async throws -> Bool {
         let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
         let existing = Library.album(named: destination)
         let source = album.flatMap { PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [$0], options: nil).firstObject }
+        let removable = source?.canPerform(.removeContent) ?? true
         try await PHPhotoLibrary.shared().performChanges {
             let duplicates = existing.flatMap { PHAssetCollectionChangeRequest(for: $0) }
                 ?? PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: destination)
             duplicates.addAssets(assets)
-            if let source, source.canPerform(.removeContent) {
+            if let source, removable, !delete {
                 PHAssetCollectionChangeRequest(for: source)?.removeAssets(assets)
             }
+        }
+        guard delete else { return removable }
+        // Deleted separately, after they're in the album, so recovering them
+        // from Recently Deleted brings them back to it. If the deletion is
+        // turned down, take them back out so nothing has changed.
+        do {
+            try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.deleteAssets(assets) }
+        } catch {
+            try? await restore(ids, from: destination, to: nil)
+            throw error
+        }
+        return true
+    }
+
+    /// Why PixelGraph can't take photos out of an album ("synced from your
+    /// Mac"), or nil when it can.
+    static func readOnlyReason(_ id: String) -> String? {
+        guard let album = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [id], options: nil).firstObject,
+              !album.canPerform(.removeContent) else { return nil }
+        switch album.assetCollectionSubtype {
+        case .albumSyncedAlbum, .albumSyncedEvent, .albumSyncedFaces: return "synced from your Mac or iTunes"
+        case .albumImported: return "imported"
+        case .albumCloudShared: return "a shared album"
+        case .albumMyPhotoStream: return "My Photo Stream"
+        default: return "read-only"
         }
     }
 

@@ -174,7 +174,10 @@ struct Undo: AsyncParsableCommand {
             run.unmark(record.ids)
             try run.save()
         }
-        print("Put back \(record.ids.count) photos in \(record.source).")
+        if !record.ids.isEmpty { print("Put back \(record.ids.count) photos in \(record.source).") }
+        if !record.deleted.isEmpty {
+            print("\(record.deleted.count) photos were deleted; recover them in Photos → Recently Deleted.")
+        }
     }
 }
 

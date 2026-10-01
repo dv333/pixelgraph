@@ -411,8 +411,9 @@ final class ReviewSession {
     private func move(file: [String], duplicates: [String]) async {
         do {
             let batch = UUID()
-            if !file.isEmpty { _ = try await Mover.move(file, from: source, to: .documents, batch: batch) }
-            if !duplicates.isEmpty { _ = try await Mover.move(duplicates, from: source, to: .duplicates, batch: batch) }
+            var records: [Mover.Record] = []
+            if !file.isEmpty { records.append(try await Mover.move(file, from: source, to: .documents, batch: batch)) }
+            if !duplicates.isEmpty { records.append(try await Mover.move(duplicates, from: source, to: .duplicates, batch: batch)) }
             run.markMoved(file + duplicates)
             history.append(.move(file + duplicates))
             dirty = true
@@ -420,8 +421,16 @@ final class ReviewSession {
             save()
             var parts: [String] = []
             if !file.isEmpty { parts.append("filed \(file.count) in PGDocuments") }
-            if !duplicates.isEmpty { parts.append("moved \(duplicates.count) to Duplicates") }
-            toast = ui.green("✓") + " " + parts.joined(separator: ", ").capitalizedFirst + " · " + ui.blue("u") + ui.dim(" undo")
+            if !duplicates.isEmpty {
+                parts.append(records.contains { $0.deleted == true }
+                             ? "deleted \(duplicates.count) to Recently Deleted" : "moved \(duplicates.count) to Duplicates")
+            }
+            var message = ui.green("✓") + " " + parts.joined(separator: ", ").capitalizedFirst
+            if case .album(let id, let name) = source, records.contains(where: { $0.leftInSource == true }) {
+                message += ui.amber(" · still in \(name) too: it’s \(Library.readOnlyReason(id) ?? "read-only")")
+            }
+            if records.contains(where: { $0.deleted != true }) { message += " · " + ui.blue("u") + ui.dim(" undo") }
+            toast = message
         } catch {
             toast = ui.red("Couldn't move: \(error.localizedDescription)")
         }
@@ -449,7 +458,13 @@ final class ReviewSession {
             dirty = true
             needsFull = true
             save()
-            toast = ui.green("✓") + " Put back \(undone.ids.count) photo\(undone.ids.count == 1 ? "" : "s")"
+            func count(_ n: Int) -> String { "\(n) photo\(n == 1 ? "" : "s")" }
+            var parts: [String] = []
+            if !undone.ids.isEmpty { parts.append(ui.green("✓") + " Put back \(count(undone.ids.count))") }
+            if !undone.deleted.isEmpty {
+                parts.append(ui.amber("\(count(undone.deleted.count)) deleted: recover in Photos → Recently Deleted"))
+            }
+            toast = parts.joined(separator: ui.dim(" · "))
         } catch {
             toast = ui.red("Couldn't undo: \(error.localizedDescription)")
         }
@@ -1095,19 +1110,33 @@ final class ReviewSession {
     private func confirmSheet(file: [String], duplicates: [String]) -> String {
         func count(_ n: Int) -> String { "\(n) photo\(n == 1 ? "" : "s")" }
         var title: String
+        let deletes: Bool
+        if case .dates = source { deletes = true } else { deletes = false }
         switch (file.isEmpty, duplicates.isEmpty) {
+        case (false, false) where deletes: title = "File \(file.count) in PGDocuments and delete \(count(duplicates.count))?"
         case (false, false): title = "File \(file.count) in PGDocuments and move \(count(duplicates.count)) to Duplicates?"
         case (false, true): title = "File \(count(file.count)) in PGDocuments?"
+        case _ where deletes: title = "Delete \(count(duplicates.count))?"
         default: title = "Move \(count(duplicates.count)) to \(source.isPhotos ? "“\(Library.duplicatesAlbum)”" : "Duplicates")?"
         }
         let detail: [String]
         switch source {
-        case .album(_, let name):
-            detail = ["They’ll leave \(name) but stay in your library.",
-                      file.isEmpty ? "Delete them from the Duplicates album whenever you’re ready." : "Documents go to the PGDocuments album."]
+        case .album(let id, let name):
+            if let reason = Library.readOnlyReason(id) {
+                detail = ["\(name) is \(reason), so they can’t leave it:",
+                          "they’ll be added to the \(file.isEmpty ? "Duplicates" : "PGDocuments and Duplicates") album\(file.isEmpty ? "" : "s") but stay in \(name)."]
+            } else {
+                detail = ["They’ll leave \(name) but stay in your library.",
+                          file.isEmpty ? "Delete them from the Duplicates album whenever you’re ready." : "Documents go to the PGDocuments album."]
+            }
         case .dates:
-            detail = ["They stay in your library, collected in the",
-                      file.isEmpty ? "“\(Library.duplicatesAlbum)” album." : "PGDocuments and Duplicates albums."]
+            switch (file.isEmpty, duplicates.isEmpty) {
+            case (false, true):
+                detail = ["They stay in your library, collected in the", "PGDocuments album."]
+            default:
+                detail = ["Duplicates go to Recently Deleted in Photos (kept 30 days);",
+                          file.isEmpty ? "macOS asks first. PixelGraph can’t undo this." : "documents stay, in PGDocuments. PixelGraph can’t undo this."]
+            }
         case .folder(let path):
             let name = (path as NSString).lastPathComponent
             switch (file.isEmpty, duplicates.isEmpty) {
