@@ -56,6 +56,7 @@ One key means one thing on every screen, and keys set a state rather than toggli
 | K | keep this photo (on a group: keep them all) |
 | X | move this photo (on a group: all but the best) |
 | B | make it the best ★ |
+| A | select every photo in the group; the next K, X, R or M applies to all of them (Esc clears) |
 | R | say why it's moving |
 | C | compare two photos side by side: ← → change the candidate, ↑ pins it |
 | O | show the photo in Finder (Photos library photos open in Photos) |

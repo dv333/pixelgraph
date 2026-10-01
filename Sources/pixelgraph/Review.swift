@@ -190,7 +190,32 @@ final class ReviewSession {
 
         case .group:
             let perRow = GroupLayout(count: order.count, cols: ui.cols, rows: ui.rows).perRow
+            if allSelected {
+                // A selected every photo: the next K, X, R or M applies to all of them.
+                allSelected = false
+                needsFull = true
+                switch key {
+                case .char("k"): keepAll(); return nil
+                case .char("x"): moveAll(); return nil
+                case .char("r"):
+                    allSelected = true
+                    sheet = .reason
+                    return nil
+                case .char("m"):
+                    moveAll()
+                    askToMove(everything: false)
+                    return nil
+                case .escape, .backspace, .char("a"):
+                    toast = ui.dim("Selection cleared")
+                    return nil
+                default: break
+                }
+            }
             switch key {
+            case .char("a"):
+                allSelected = true
+                needsFull = true
+                toast = ui.blue("All \(order.count) photos selected") + ui.dim(" · k keep · x move · r reason · m move now · esc clear")
             case .left: cursor = max(0, cursor - 1)
             case .right: cursor = min(order.count - 1, cursor + 1)
             case .up: cursor = max(0, cursor - perRow)
@@ -255,14 +280,22 @@ final class ReviewSession {
         case .reason:
             let id = order[cursor].id
             switch key {
-            case .escape, .backspace, .click: sheet = nil
-            case .enter:
-                setReason(id, pick.suggestions[id] ?? "other")
+            let forAll = allSelected
+            func apply(_ reason: String) {
+                if forAll { reasonForAll(reason) } else { setReason(id, reason) }
                 sheet = nil
+                allSelected = false
+                needsFull = true
+            }
+            switch key {
+            case .escape, .backspace, .click:
+                sheet = nil
+                allSelected = false
+                needsFull = true
+            case .enter: apply(forAll ? "other" : pick.suggestions[id] ?? "other")
             case .char(let c):
                 guard let n = c.wholeNumberValue, (1...Inspector.reasons.count).contains(n) else { return }
-                setReason(id, Inspector.reasons[n - 1])
-                sheet = nil
+                apply(Inspector.reasons[n - 1])
             default: break
             }
         case .help:
@@ -322,6 +355,7 @@ final class ReviewSession {
         cursor = 0
         gridScroll = 0
         seen = []
+        allSelected = false
         screen = .group
     }
 
@@ -482,6 +516,37 @@ final class ReviewSession {
         edit(say: "\(name(id)) → PGDocuments") { pick in
             pick.kept.removeAll { $0 == id }
             if !pick.keepers.contains(id) { pick.keepers.append(id) }
+        }
+    }
+
+    /// A then K, X or R: every photo in the group not already moved.
+    private var allSelected = false
+
+    private var movable: [String] { group.photos.map(\.id).filter { !pick.moved.contains($0) } }
+
+    private func keepAll() {
+        let ids = movable
+        edit(say: "All \(ids.count) → Keep") { pick in
+            for id in ids where !pick.isKept(id) { pick.kept.append(id) }
+            for id in ids { pick.reasons[id] = nil }
+        }
+    }
+
+    /// Every photo to move, the best included, so the group is emptied.
+    private func moveAll() {
+        let ids = movable
+        edit(say: "All \(ids.count) → Move") { pick in
+            pick.keepers.removeAll { ids.contains($0) }
+            pick.kept.removeAll { ids.contains($0) }
+        }
+    }
+
+    private func reasonForAll(_ reason: String) {
+        let ids = movable
+        edit(say: "All \(ids.count) → Move · \(reason)") { pick in
+            pick.keepers.removeAll { ids.contains($0) }
+            pick.kept.removeAll { ids.contains($0) }
+            for id in ids { pick.reasons[id] = reason }
         }
     }
 
@@ -700,7 +765,7 @@ final class ReviewSession {
         let s: String
         switch screen {
         case .groups: s = "groups \(overview) \(scroll)"
-        case .group: s = "group \(groupIndex) \(gridScroll)"
+        case .group: s = "group \(groupIndex) \(gridScroll) \(allSelected)"
         case .photo: s = "photo \(groupIndex) \(cursor)"
         case .compare: s = "compare \(groupIndex) \(pinned) \(cursor)"
         }
@@ -795,7 +860,7 @@ final class ReviewSession {
                 return ui.actionBar(hints: "space look · d file · k keep here · x duplicate · c compare · u undo · esc back",
                                     short: "d file · k keep · x dup · esc", action: fileButton(filing, copies: moving))
             }
-            return ui.actionBar(hints: "space look · k keep · x move · b best · c compare · o show in Finder · u undo · esc back · ? keys",
+            return ui.actionBar(hints: "space look · k keep · x move · b best · a all · c compare · o show in Finder · u undo · esc back · ? keys",
                                 short: "k keep · x move · ? keys", action: moveButton(moving, label: "Move \(moving)"))
         }
     }
@@ -1204,7 +1269,7 @@ final class ReviewSession {
         let member = order[index]
         let s = state(member.id)
         let (r, c) = tileOrigin(index, layout)
-        let ui = self.ui, focused = index == cursor
+        let ui = self.ui, focused = index == cursor || allSelected
         let paint: (String) -> String = { focused ? ui.blue($0) : s == .best ? ui.green($0) : ui.gray($0) }
         var out = ui.box(row: r, col: c, width: layout.tileWidth, height: layout.imageRows + 2,
                          label: label(s, number: index + 1), paint: paint, heavy: focused)
@@ -1321,6 +1386,7 @@ final class ReviewSession {
             row("x", "move this photo (group: all but the best)"),
             row("b", "make it the best ★"),
             row("r", "say why it's moving"),
+            row("a", "select every photo in the group; then k, x, r or m applies to all"),
             row("c", "compare two photos side by side"),
             row("o", "show the photo in Finder (Photos library: in Photos)"),
             row("d", "documents tab: file this copy in PGDocuments"),
@@ -1338,8 +1404,8 @@ final class ReviewSession {
 
     private func reasonSheet() -> String {
         let id = order[cursor].id
-        let suggestion = pick.suggestions[id]
-        var lines = [ui.bold("Why move photo \(cursor + 1)?")]
+        let suggestion = allSelected ? nil : pick.suggestions[id]
+        var lines = [ui.bold(allSelected ? "Why move all \(order.count) photos?" : "Why move photo \(cursor + 1)?")]
         if let suggestion { lines.append(ui.dim("PixelGraph noticed: ") + ui.amber(suggestion)) }
         lines.append("")
         let options = Inspector.reasons.enumerated().map { ui.blue("\($0.offset + 1)") + " \($0.element)" }
