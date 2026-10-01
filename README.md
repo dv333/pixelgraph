@@ -58,6 +58,7 @@ One key means one thing on every screen, and keys set a state rather than toggli
 | B | make it the best ★ |
 | R | say why it's moving |
 | C | compare two photos side by side: ← → change the candidate, ↑ pins it |
+| O | show the photo in Finder (Photos library photos open in Photos) |
 | M | move the selection to PGDuplicates, or D in the sheet to delete it — always asks first |
 | Tab | switch between Duplicates, Documents and Junk |
 | U | undo the last change or move |

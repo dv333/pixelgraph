@@ -199,6 +199,7 @@ final class ReviewSession {
             // Space looks closer, like Quick Look in Finder.
             case .enter, .char(" "): screen = .photo
             case .char("c"): openCompare()
+            case .char("o"): reveal(order[cursor].id)
             case .char("k"): keep(order[cursor].id)
             case .char("x"): markMove(order[cursor].id)
             case .char("b"): makeBest(order[cursor].id)
@@ -219,6 +220,7 @@ final class ReviewSession {
             case .left, .up: cursor = (cursor - 1 + order.count) % order.count
             case .right, .down: cursor = (cursor + 1) % order.count
             case .char("c"): openCompare()
+            case .char("o"): reveal(order[cursor].id)
             case .char("k"): keep(order[cursor].id)
             case .char("x"): markMove(order[cursor].id)
             case .char("b"): makeBest(order[cursor].id)
@@ -232,6 +234,7 @@ final class ReviewSession {
             case .right, .down: cursor = nextCandidate(after: cursor, step: 1)
             case .left: cursor = nextCandidate(after: cursor, step: -1)
             case .up, .tab: swap(&pinned, &cursor)
+            case .char("o"): reveal(order[cursor].id)
             case .char("k"): keep(order[cursor].id)
             case .char("x"): markMove(order[cursor].id)
             case .char("b"): makeBest(order[cursor].id)
@@ -316,6 +319,39 @@ final class ReviewSession {
         cursor = 0
         seen = []
         screen = .group
+    }
+
+    // MARK: - Show in Finder
+
+    /// o: shows a photo where it lives: selected in Finder for files (in
+    /// PGDuplicates or the Trash if it has been moved), in Photos for the library.
+    private func reveal(_ id: String) {
+        if id.hasPrefix("file:") {
+            var path = String(id.dropFirst(5))
+            if !FileManager.default.fileExists(atPath: path),
+               let moved = Mover.history().reversed().lazy.flatMap(\.files).first(where: { $0.from == path }) {
+                path = moved.to
+            }
+            guard FileManager.default.fileExists(atPath: path) else {
+                toast = ui.dim("Can't find that file any more")
+                return
+            }
+            launch(["/usr/bin/open", "-R", path])
+            toast = ui.green("✓") + " Shown in Finder"
+        } else {
+            launch(["/usr/bin/osascript", "-e", "on run argv", "-e", "tell application \"Photos\"", "-e", "activate",
+                 "-e", "spotlight media item id (item 1 of argv)", "-e", "end tell", "-e", "end run", id])
+            toast = ui.green("✓") + " Shown in Photos"
+        }
+    }
+
+    private func launch(_ arguments: [String]) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: arguments[0])
+        process.arguments = Array(arguments.dropFirst())
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
     }
 
     // MARK: - Reviewed
@@ -733,7 +769,7 @@ final class ReviewSession {
                 return ui.actionBar(hints: "space look · d file · k keep here · x duplicate · c compare · u undo · esc back",
                                     short: "d file · k keep · x dup · esc", action: fileButton(filing, copies: moving))
             }
-            return ui.actionBar(hints: "space look · k keep · x move · b best · c compare · u undo · esc back · ? keys",
+            return ui.actionBar(hints: "space look · k keep · x move · b best · c compare · o show in Finder · u undo · esc back · ? keys",
                                 short: "k keep · x move · ? keys", action: moveButton(moving, label: "Move \(moving)"))
         }
     }
@@ -1246,6 +1282,7 @@ final class ReviewSession {
             row("b", "make it the best ★"),
             row("r", "say why it's moving"),
             row("c", "compare two photos side by side"),
+            row("o", "show the photo in Finder (Photos library: in Photos)"),
             row("d", "documents tab: file this copy in PGDocuments"),
             row("tab", "switch between Duplicates, Documents and Junk"),
             "",
