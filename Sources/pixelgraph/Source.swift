@@ -199,8 +199,9 @@ enum Files {
     /// What the Duplicates folder was called before; moves made then went there.
     static let oldDuplicatesFolder = "PixelGraph Duplicates"
     /// Folders PixelGraph makes, skipped when scanning.
-    static let ownFolders: Set<String> = [duplicatesFolder, documentsFolder, oldDuplicatesFolder]
+    static let ownFolders: Set<String> = [duplicatesFolder, documentsFolder, junkFolder, oldDuplicatesFolder]
     static let documentsFolder = "PGDocuments"
+    static let junkFolder = "PGJunk"
 
     static let imageExtensions: Set<String> = [
         "jpg", "jpeg", "heic", "heif", "png", "tif", "tiff", "webp",

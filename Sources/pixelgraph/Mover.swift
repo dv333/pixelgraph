@@ -12,9 +12,24 @@ enum Mover {
         case duplicates, documents
         /// Recently Deleted in Photos, the Trash for files.
         case trash
+        /// Photos that look like junk, kept apart from the duplicates.
+        case junk
 
-        var album: String { self == .documents ? Library.documentsAlbum : Library.duplicatesAlbum }
-        var folder: String { self == .documents ? Files.documentsFolder : Files.duplicatesFolder }
+        var album: String {
+            switch self {
+            case .documents: Library.documentsAlbum
+            case .junk: Library.junkAlbum
+            default: Library.duplicatesAlbum
+            }
+        }
+
+        var folder: String {
+            switch self {
+            case .documents: Files.documentsFolder
+            case .junk: Files.junkFolder
+            default: Files.duplicatesFolder
+            }
+        }
     }
 
     struct Record: Codable {

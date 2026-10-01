@@ -45,36 +45,35 @@ final class ReviewSession {
     }
 
     private var source: Source { run.source ?? .dates(from: nil, to: nil) }
-    private enum Tab { case duplicates, documents, junk }
+    private enum Tab { case duplicates, documents }
     private var tab = Tab.duplicates
 
-    /// The groups on the current tab: lookalikes, documents, or junk.
+    /// The groups on the current tab: lookalikes followed by the junk
+    /// groups (one per reason), or documents.
     private var groups: [Run.Group] {
         get {
             switch tab {
-            case .duplicates: run.groups
+            case .duplicates: run.groups + (run.junkGroups ?? [])
             case .documents: run.documentGroups ?? []
-            case .junk: run.junkGroups ?? []
             }
         }
         set {
             switch tab {
-            case .duplicates: run.groups = newValue
+            case .duplicates:
+                let lookalikes = run.groups.count
+                run.groups = Array(newValue.prefix(lookalikes))
+                if run.junkGroups != nil { run.junkGroups = Array(newValue.dropFirst(lookalikes)) }
             case .documents: run.documentGroups = newValue
-            case .junk: run.junkGroups = newValue
             }
         }
     }
 
     private var hasDocuments: Bool { !(run.documentGroups ?? []).isEmpty }
-    private var hasJunk: Bool { !(run.junkGroups ?? []).isEmpty }
+    private var junkCount: Int { (run.junkGroups ?? []).reduce(0) { $0 + $1.photos.count } }
+    /// Photos from the junk groups, which move to PGJunk rather than PGDuplicates.
+    private var junkIDs: Set<String> { Set((run.junkGroups ?? []).flatMap { $0.photos.map(\.id) }) }
     /// The tabs this scan has, in the order tab goes through them.
-    private var tabs: [Tab] {
-        var tabs: [Tab] = [.duplicates]
-        if hasDocuments { tabs.append(.documents) }
-        if hasJunk { tabs.append(.junk) }
-        return tabs
-    }
+    private var tabs: [Tab] { hasDocuments ? [.duplicates, .documents] : [.duplicates] }
 
     private var group: Run.Group { groups[groupIndex] }
     private var pick: Pick { group.pick }
@@ -96,7 +95,7 @@ final class ReviewSession {
             let key = ui.term.nextKey()
             // The wheel only scrolls the groups; elsewhere it changes nothing,
             // so don't redraw for it.
-            if case .scroll = key, screen != .groups || sheet != nil { continue }
+            if case .scroll = key, (screen != .groups && screen != .group) || sheet != nil { continue }
             if let outcome = await handle(key) { return outcome }
             noteSeen()
             draw()
@@ -173,7 +172,7 @@ final class ReviewSession {
             case .char("v"): overview = overview == .mosaic ? .filmstrip : .mosaic; scroll = 0
             case .char("m"): askToMove(everything: true)
             case .tab:
-                guard tabs.count > 1 else { toast = ui.dim("No documents or junk in this scan."); break }
+                guard tabs.count > 1 else { toast = ui.dim("No documents in this scan."); break }
                 tab = tabs[((tabs.firstIndex(of: tab) ?? 0) + 1) % tabs.count]
                 groupIndex = 0
                 scroll = 0
@@ -198,6 +197,10 @@ final class ReviewSession {
             case .down: cursor = min(order.count - 1, cursor + perRow)
             // Space looks closer, like Quick Look in Finder.
             case .enter, .char(" "): screen = .photo
+            case .scroll(let ticks): cursor = min(max(0, cursor + (ticks > 0 ? perRow : -perRow)), order.count - 1)
+            case .pageDown, .pageUp:
+                let page = GroupLayout(count: order.count, cols: ui.cols, rows: ui.rows).visible
+                cursor = min(max(0, cursor + (key == .pageDown ? page : -page)), order.count - 1)
             case .char("c"): openCompare()
             case .char("o"): reveal(order[cursor].id)
             case .char("k"): keep(order[cursor].id)
@@ -317,6 +320,7 @@ final class ReviewSession {
         select(index)
         order = Run.displayOrder(group)
         cursor = 0
+        gridScroll = 0
         seen = []
         screen = .group
     }
@@ -553,8 +557,22 @@ final class ReviewSession {
                 done += 1
             }
             if !duplicates.isEmpty {
-                step(deletes ? "Deleting \(count(duplicates.count))…" : "Moving \(count(duplicates.count)) to PGDuplicates…")
-                records.append(try await Mover.move(duplicates, from: source, to: target, batch: batch))
+                if deletes {
+                    step("Deleting \(count(duplicates.count))…")
+                    records.append(try await Mover.move(duplicates, from: source, to: .trash, batch: batch))
+                } else {
+                    // Junk goes to its own album or folder, apart from the duplicates.
+                    let junk = junkIDs
+                    let copies = duplicates.filter { !junk.contains($0) }, rejects = duplicates.filter { junk.contains($0) }
+                    if !copies.isEmpty {
+                        step("Moving \(count(copies.count)) to PGDuplicates…")
+                        records.append(try await Mover.move(copies, from: source, to: .duplicates, batch: batch))
+                    }
+                    if !rejects.isEmpty {
+                        step("Moving \(count(rejects.count)) to PGJunk…")
+                        records.append(try await Mover.move(rejects, from: source, to: .junk, batch: batch))
+                    }
+                }
                 done += 1
             }
             run.markMoved(file + duplicates)
@@ -572,7 +590,14 @@ final class ReviewSession {
             var parts: [String] = []
             if !file.isEmpty { parts.append("filed \(file.count) in PGDocuments") }
             if !duplicates.isEmpty {
-                parts.append(deletes ? "deleted \(duplicates.count) to \(bin)" : "moved \(duplicates.count) to PGDuplicates")
+                let junkIDs = self.junkIDs
+                let junk = duplicates.filter { junkIDs.contains($0) }.count
+                if deletes {
+                    parts.append("deleted \(duplicates.count) to \(bin)")
+                } else {
+                    if duplicates.count > junk { parts.append("moved \(duplicates.count - junk) to PGDuplicates") }
+                    if junk > 0 { parts.append("moved \(junk) junk to PGJunk") }
+                }
             }
             if !captioned.isEmpty { parts.append("described \(captioned.count) kept") }
             var message = ui.green("✓") + " " + parts.joined(separator: ", ").capitalizedFirst
@@ -625,11 +650,10 @@ final class ReviewSession {
     private func undo() async {
         if case .mark(let markTab, let g, let before)? = history.last {
             history.removeLast()
-            switch markTab {
-            case .duplicates: run.groups[g].pick = before
-            case .documents: run.documentGroups?[g].pick = before
-            case .junk: run.junkGroups?[g].pick = before
-            }
+            let current = tab
+            tab = markTab
+            groups[g].pick = before
+            tab = current
             dirty = true
             needsFull = true
             toast = ui.green("✓") + " Undone"
@@ -676,7 +700,7 @@ final class ReviewSession {
         let s: String
         switch screen {
         case .groups: s = "groups \(overview) \(scroll)"
-        case .group: s = "group \(groupIndex)"
+        case .group: s = "group \(groupIndex) \(gridScroll)"
         case .photo: s = "photo \(groupIndex) \(cursor)"
         case .compare: s = "compare \(groupIndex) \(pinned) \(cursor)"
         }
@@ -689,6 +713,7 @@ final class ReviewSession {
     /// moving the selection repaints two frames, marking a photo repaints its
     /// tile. Everything else repaints the whole screen.
     private func draw() {
+        if screen == .group { keepGridVisible() }
         if screen == .groups { keepSelectionVisible() }
         let key = frameKey()
         let partial = !needsFull && sheet == nil && key == drawnFrame && (screen == .groups || screen == .group)
@@ -746,7 +771,8 @@ final class ReviewSession {
                 : filmstripRow(index, content: content)
         case .group:
             let layout = GroupLayout(count: order.count, cols: ui.cols, rows: ui.rows)
-            guard index >= 0, index < min(order.count, layout.visible) else { return "" }
+            let first = gridScroll * layout.perRow
+            guard index >= first, index < min(order.count, first + layout.visible) else { return "" }
             return groupTile(index, layout: layout, content: content)
         default: return ""
         }
@@ -788,15 +814,15 @@ final class ReviewSession {
     private func overviewHeader(range: String = "") -> String {
         let photos = groups.reduce(0) { $0 + $1.photos.count }
         let reviewed = groups.filter { $0.reviewed == true }.count
-        let noun = tab == .documents ? "documents" : "groups"
-        var left = ui.bold(run.scope) + ui.dim(" · \(groups.count) \(noun) · \(photos) photos")
+        let counted = tab == .documents ? "\(groups.count) documents"
+            : junkCount > 0 ? "\(run.groups.count) groups + \((run.junkGroups ?? []).count) junk" : "\(groups.count) groups"
+        var left = ui.bold(run.scope) + ui.dim(" · \(counted) · \(photos) photos")
         if tabs.count > 1 {
             let on = { [ui] (text: String) in ui.bold("[" + text + "]") }
             func label(_ t: Tab) -> String {
                 switch t {
-                case .duplicates: "Duplicates \(run.groups.count)"
+                case .duplicates: "Duplicates \(run.groups.count)" + (junkCount > 0 ? " + Junk \(junkCount)" : "")
                 case .documents: "Documents \((run.documentGroups ?? []).reduce(0) { $0 + $1.photos.count })"
-                case .junk: "Junk \((run.junkGroups ?? []).reduce(0) { $0 + $1.photos.count })"
                 }
             }
             left = tabs.map { $0 == tab ? on(label($0)) : ui.dim(label($0)) }.joined(separator: "  ") + ui.dim("  tab · ") + left
@@ -812,8 +838,8 @@ final class ReviewSession {
             return (selected ? ui.bold(title) : title) + (g.reviewed == true ? " " + ui.green("✓") : "")
         }
         if g.kind == .junk {
-            let title = (g.pick.suggestions.values.first ?? "junk").capitalizedFirst + " · " + Format.day.string(from: g.photos[0].date)
-            return (selected ? ui.bold(title) : title) + (g.reviewed == true ? " " + ui.green("✓") : "")
+            let title = "Junk · " + (g.pick.suggestions.values.first ?? "junk").capitalizedFirst
+            return ui.amber(selected ? ui.bold(title) : title) + (g.reviewed == true ? " " + ui.green("✓") : "")
         }
         var title = Format.day.string(from: g.photos[0].date)
         title = selected ? ui.bold(title) : title
@@ -1143,19 +1169,33 @@ final class ReviewSession {
         let n = order.count
         let layout = GroupLayout(count: n, cols: ui.cols, rows: ui.rows)
         var out = groupHeader()
-        for index in 0..<min(n, layout.visible) {
+        let first = gridScroll * layout.perRow
+        for index in first..<min(n, first + layout.visible) {
             out += groupTile(index, layout: layout, content: true)
             let (r, c) = tileOrigin(index, layout)
             hits.append((r...(r + layout.imageRows + 1), c...(c + layout.tileWidth - 1), .photo(index)))
         }
         if layout.visible < n {
-            out += ui.at(ui.rows - 2, 2) + ui.dim(ui.fit("+\(n - layout.visible) more: enlarge any photo and use → to reach them", ui.cols - 2))
+            let last = min(n, first + layout.visible)
+            out += ui.at(ui.rows - 2, 2) + ui.dim(ui.fit("photos \(first + 1)–\(last) of \(n) · ↑↓, the wheel or page up/down for more", ui.cols - 2))
         }
         return out + footer()
     }
 
     private func tileOrigin(_ index: Int, _ layout: GroupLayout) -> (row: Int, col: Int) {
-        (3 + (index / layout.perRow) * (layout.imageRows + 7), 2 + (index % layout.perRow) * (layout.tileWidth + 2))
+        let k = index - gridScroll * layout.perRow
+        return (3 + (k / layout.perRow) * (layout.imageRows + 7), 2 + (k % layout.perRow) * (layout.tileWidth + 2))
+    }
+
+    /// The first row of photos shown in a group too big for the window.
+    private var gridScroll = 0
+
+    /// Scrolls the group's grid so the highlighted photo is on screen.
+    private func keepGridVisible() {
+        let layout = GroupLayout(count: order.count, cols: ui.cols, rows: ui.rows)
+        let rowsShown = max(1, layout.visible / layout.perRow), row = cursor / layout.perRow
+        if row < gridScroll { gridScroll = row }
+        if row >= gridScroll + rowsShown { gridScroll = row - rowsShown + 1 }
     }
 
     /// A photo tile: frame with its label, plus the photo and captions when
@@ -1284,7 +1324,7 @@ final class ReviewSession {
             row("c", "compare two photos side by side"),
             row("o", "show the photo in Finder (Photos library: in Photos)"),
             row("d", "documents tab: file this copy in PGDocuments"),
-            row("tab", "switch between Duplicates, Documents and Junk"),
+            row("tab", "switch between Duplicates (junk groups at the end) and Documents"),
             "",
             row("m", "move the selection to PGDuplicates or delete it (asks first)"),
             row("u", "undo the last change or move"),
@@ -1359,7 +1399,10 @@ final class ReviewSession {
             let gone = source.isPhotos
                 ? "to Recently Deleted in Photos (30 days); macOS asks first; PixelGraph can’t undo it"
                 : "to the Trash, with RAW and sidecars; u puts them back"
-            lines += [ui.blue("enter") + "  Move to PGDuplicates"] + ui.wrap(keep, width: width - 7, lines: 2).map { "       " + ui.dim($0) }
+            let junkIDs = self.junkIDs
+            let junk = duplicates.filter { junkIDs.contains($0) }.count
+            let into = junk == 0 ? "PGDuplicates" : junk == duplicates.count ? "PGJunk" : "PGDuplicates, junk to PGJunk"
+            lines += [ui.blue("enter") + "  Move to \(into)"] + ui.wrap(keep, width: width - 7, lines: 2).map { "       " + ui.dim($0) }
             lines += ["", ui.blue("d") + "      Delete"] + ui.wrap(gone, width: width - 7, lines: 2).map { "       " + ui.dim($0) }
         }
         if !file.isEmpty, !source.isPhotos {

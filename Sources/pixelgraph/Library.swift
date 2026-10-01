@@ -116,10 +116,11 @@ enum Library {
 
     static let duplicatesAlbum = "PGDuplicates"
     static let documentsAlbum = "PGDocuments"
+    static let junkAlbum = "PGJunk"
     /// What the Duplicates album was called before; moves made then went there.
     static let oldDuplicatesAlbum = "PixelGraph Duplicates"
     /// Albums PixelGraph makes, left out of the albums you can scan.
-    static let ownAlbums: Set<String> = [duplicatesAlbum, documentsAlbum, oldDuplicatesAlbum]
+    static let ownAlbums: Set<String> = [duplicatesAlbum, documentsAlbum, junkAlbum, oldDuplicatesAlbum]
 
     /// Adds photos to the album called `destination` (creating it if needed)
     /// and takes them out of `album`. Nothing leaves the library. Returns

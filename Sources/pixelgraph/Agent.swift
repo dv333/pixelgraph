@@ -215,19 +215,29 @@ enum Agent {
         if let groupIDs { chosen = try groupIDs.map { id in try place(id, in: run) } }
         var result = Moved()
         var ids: [String] = []
+        var junk: Set<String> = []
         for p in chosen {
             let g = group(run, p)
             var moving = clearOnly ? clearMoves(g) : g.photos.map(\.id).filter { g.pick.willMove($0) }
             moving = Array(moving.prefix(max(0, limit - ids.count)))
             guard !moving.isEmpty else { continue }
             ids += moving
+            if p.junk { junk.formUnion(moving) }
             result.groups.append(p.id)
             result.preview.append(["group": p.id, "photos": g.photos.indices.filter { moving.contains(g.photos[$0].id) }.map(letter)])
         }
         result.photos = ids.count
         guard !dryRun, !ids.isEmpty else { return result }
         if source.isPhotos { try await Library.requestAccess() }
-        _ = try await Mover.move(ids, from: source, to: destination, batch: UUID())
+        let batch = UUID()
+        if destination == .duplicates {
+            // Junk goes to its own album or folder, apart from the duplicates.
+            let copies = ids.filter { !junk.contains($0) }, rejects = ids.filter { junk.contains($0) }
+            if !copies.isEmpty { _ = try await Mover.move(copies, from: source, to: .duplicates, batch: batch) }
+            if !rejects.isEmpty { _ = try await Mover.move(rejects, from: source, to: .junk, batch: batch) }
+        } else {
+            _ = try await Mover.move(ids, from: source, to: destination, batch: batch)
+        }
         run.markMoved(ids)
         try run.save(to: workspace.runFile)
         return result

@@ -185,17 +185,15 @@ struct Scanner {
         return Self.junkGroups(singles.filter { reasons[$0.id] != nil }, reasons: reasons)
     }
 
-    /// Junk in groups of up to 24 by reason, everything selected to move.
+    /// Junk in one group per reason, everything selected to move.
     static func junkGroups(_ photos: [Photo], reasons: [String: String]) -> [Run.Group] {
         let byReason = Dictionary(grouping: photos.filter { reasons[$0.id] != nil }) { reasons[$0.id]! }
         let ordered = Junk.order.filter { byReason[$0] != nil } + byReason.keys.filter { !Junk.order.contains($0) }.sorted()
-        return ordered.compactMap { byReason[$0] }.flatMap { photos in
-            stride(from: 0, to: photos.count, by: 24).map { start in
-                let members = Array(photos.sorted { $0.date < $1.date }[start ..< min(start + 24, photos.count)])
-                let ids = members.map(\.id)
-                return Run.Group(kind: .junk, photos: members.map(Run.Member.init),
-                                 pick: Pick.rejects(ids, reasons: reasons.filter { ids.contains($0.key) }))
-            }
+        return ordered.compactMap { byReason[$0] }.map { members in
+            let sorted = members.sorted { $0.date < $1.date }
+            let ids = sorted.map(\.id)
+            return Run.Group(kind: .junk, photos: sorted.map(Run.Member.init),
+                             pick: Pick.rejects(ids, reasons: reasons.filter { ids.contains($0.key) }))
         }
     }
 
