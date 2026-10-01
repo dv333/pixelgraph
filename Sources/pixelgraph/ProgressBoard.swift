@@ -24,18 +24,22 @@ final class ProgressBoard: @unchecked Sendable {
     private var drawnLines = 0
     private var finished = false
     private var lastDraw = Date.distantPast
-    private let live = isatty(STDOUT_FILENO) != 0
+    private let live: Bool
+    /// Prints nothing at all: for the MCP server, whose output is the protocol.
+    private let quiet: Bool
     /// Full-screen mode draws from the top of the screen instead of in place.
     private let fullScreen: Bool
 
-    init(heading: String, stages: [String], fullScreen: Bool = false) {
+    init(heading: String, stages: [String], fullScreen: Bool = false, quiet: Bool = false) {
         self.heading = heading
         self.stages = stages.map { Stage(title: $0) }
         self.fullScreen = fullScreen
+        self.quiet = quiet
+        live = !quiet && isatty(STDOUT_FILENO) != 0
     }
 
     func begin() {
-        guard live else { print(heading); return }
+        guard live else { if !quiet { print(heading) }; return }
         if !fullScreen { Theme.detect() }
         if !fullScreen { write("\u{1B}[?25l") }
         draw(force: true)
@@ -64,7 +68,7 @@ final class ProgressBoard: @unchecked Sendable {
             stages[i].done = stages[i].total
             stages[i].elapsed = stages[i].started.map { Date.now.timeIntervalSince($0) } ?? -1
         }
-        if !live { print("✓ \(stages[i].title): \(detail)") }
+        if !live && !quiet { print("✓ \(stages[i].title): \(detail)") }
     }
 
     func skip(_ i: Int, detail: String) {

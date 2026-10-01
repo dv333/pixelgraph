@@ -69,11 +69,7 @@ enum Learner {
 
     /// The measures of a reviewed group, as the pick sees them.
     static func scores(_ entry: Decisions.Entry, weights: Picker.Weights) -> [Picker.Score] {
-        let raws = entry.members.map {
-            Picker.Raw(aesthetic: $0.aesthetic, sharpness: $0.focus ?? $0.sharpness, faceCount: $0.faceCount,
-                       faceQuality: $0.faceQuality, pixels: $0.width * $0.height, exposure: $0.exposure)
-        }
-        return Picker.score(raws, weights: weights)
+        Picker.score(Picker.raws(entry.members), weights: weights)
     }
 
     /// Feature differences, ★ minus each moved photo.
@@ -115,12 +111,18 @@ struct Eval: AsyncParsableCommand {
         abstract: "Measure PixelGraph against your past review decisions.")
 
     func run() async throws {
+        Swift.print(Self.report())
+    }
+
+    /// The whole evaluation as text, for the terminal and for assistants.
+    static func report() -> String {
+        var lines: [String] = []
+        func print(_ line: String) { lines.append(line) }
         let entries = Array(Decisions.load().values)
         let groups = entries.filter { $0.kind != .junk }
         let junk = entries.filter { $0.kind == .junk }
         guard !entries.isEmpty else {
-            print("No reviewed groups yet. Open some groups in `pixelgraph review`, then try again.")
-            return
+            return "No reviewed groups yet. Open some groups in `pixelgraph review`, then try again."
         }
         func percent(_ part: Int, _ whole: Int) -> String {
             whole == 0 ? "–" : String(format: "%3.0f%%  (%ld of %ld)", 100 * Double(part) / Double(whole), part, whole)
@@ -172,5 +174,6 @@ struct Eval: AsyncParsableCommand {
             print("  junk photos you moved                     " + percent(junk.flatMap(\.moving).count, photos))
         }
         print("\nMissed duplicates can't be measured from reviews: only groups PixelGraph found are here.")
+        return lines.joined(separator: "\n")
     }
 }

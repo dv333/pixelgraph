@@ -104,6 +104,29 @@ When you move a group's extra copies, the photos you keep get a title, a caption
 
 New text goes after anything already there ("Mom's birthday · Candles on a chocolate cake"), and undo puts back what was there before. A progress bar shows while it runs.
 
+### Use it from Claude, ChatGPT or Codex
+
+`pixelgraph mcp` runs PixelGraph as an MCP server: an assistant can scan, read the groups, look at the photos, change a pick, move and undo. Install the binary somewhere stable first, e.g. `swift build -c release && cp .build/release/pixelgraph /usr/local/bin/`.
+
+- **Claude Desktop:** add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+  ```json
+  { "mcpServers": { "pixelgraph": { "command": "/usr/local/bin/pixelgraph", "args": ["mcp"] } } }
+  ```
+- **Claude Code:** `claude mcp add pixelgraph -- /usr/local/bin/pixelgraph mcp`
+- **ChatGPT desktop in Codex mode, or the Codex CLI:** add to `~/.codex/config.toml`:
+  ```toml
+  [mcp_servers.pixelgraph]
+  command = "/usr/local/bin/pixelgraph"
+  args = ["mcp"]
+  ```
+- **ChatGPT on the web:** it only reaches servers on the internet, so run `pixelgraph mcp --http`, put a tunnel in front (`cloudflared tunnel --url http://127.0.0.1:8765`) and add a connector in ChatGPT's Developer mode with the URL it prints, secret code included. Anyone with that URL can reach your photos, so keep it private; deleting is switched off on this connection.
+
+Then ask, for example, "scan my photos from last month and show me the close calls". The assistant asks for a dry run before moving; it deletes only when you say so (`--no-trash` switches deleting off completely). Photo access belongs to the app that starts PixelGraph, so allow Claude or Codex when macOS asks. Thumbnails an assistant looks at are sent to that assistant's service.
+
+### Nightly clean-up
+
+`pixelgraph schedule --at 02:00 --now` runs `pixelgraph auto` every night through launchd. It scans the last 30 days into its own workspace (never your review in progress), moves only the clear cases to PGDuplicates (extra copies of the same picture, and burst shots well behind the best or flagged, when the best is clean), never deletes, caps a night at 300 photos, and sends a notification. Close calls wait for you (`pixelgraph review --nightly`) or for an assistant: add `--assistant claude` or `--assistant codex` to let Claude Code or Codex settle them with deleting switched off. `--now` runs it once straight away so macOS can ask for Photos access while you're there. `pixelgraph schedule --off` stops it; `pixelgraph undo` puts back the last move.
+
 ### iCloud
 
 With **Optimize Mac Storage** on, most originals live in iCloud. PixelGraph groups photos using the previews already on your Mac, then downloads only the photos that ended up in a group, to judge sharpness and faces properly. iCloud Drive files are fingerprinted from their thumbnails and downloaded the same way. `--offline` never downloads.

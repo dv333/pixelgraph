@@ -415,3 +415,48 @@ private func withFaces(_ p: Photo, _ faces: [FaceDetail]) -> Photo {
     #expect(apart == .months([try month(2021, 1), try month(2021, 2), try month(2022, 3)]))
     #expect(Source.runs([try month(2021, 1), try month(2021, 2), try month(2022, 3)]).count == 2)
 }
+
+// MARK: - Assistants and the nightly run
+
+private func member(_ id: String, sharpness: Float = 0.01, aesthetic: Float = 0) -> Run.Member {
+    Run.Member(id: id, date: t0, width: 4000, height: 3000, aesthetic: aesthetic, sharpness: sharpness,
+               faceCount: 0, faceQuality: -1, previewSide: 1024)
+}
+
+@Test func nightlyMovesCopiesAndClearlyWorseShotsOnly() {
+    let copies = Run.Group(kind: .copies, photos: [member("A"), member("B")], pick: Pick(best: "A", decidedBy: "vision", notes: [:]))
+    #expect(Agent.clearMoves(copies) == ["B"])
+
+    // B is far behind A; C is nearly as good, so it waits for a person.
+    let burst = Run.Group(kind: .moment, photos: [member("A", sharpness: 0.04, aesthetic: 0.6), member("B", sharpness: 0.002, aesthetic: -0.6),
+                                                  member("C", sharpness: 0.038, aesthetic: 0.58)],
+                          pick: Pick(best: "A", decidedBy: "vision", notes: [:]))
+    #expect(Agent.clearMoves(burst) == ["B"])
+
+    let revisited = Run.Group(kind: .scene, photos: [member("A"), member("B")], pick: Pick(best: "A", decidedBy: "vision", notes: [:]))
+    #expect(Agent.clearMoves(revisited).isEmpty)
+    let closeCall = Run.Group(kind: .copies, photos: [member("A"), member("B")],
+                              pick: Pick(best: "A", decidedBy: "vision", notes: [:], suggestions: ["A": "eyes closed"]))
+    #expect(Agent.clearMoves(closeCall).isEmpty)
+}
+
+@Test func httpRequestWaitsForTheWholeBody() throws {
+    let partial = Data("POST /mcp/abc HTTP/1.1\r\nContent-Length: 10\r\n\r\n{\"a\":".utf8)
+    #expect(HTTPRequest(partial) == nil)
+    let request = try #require(HTTPRequest(partial + Data("1}  ".utf8)))
+    #expect(request.method == "POST" && request.path == "/mcp/abc")
+    #expect(String(decoding: request.body, as: UTF8.self) == "{\"a\":1}  ")
+}
+
+@Test func mcpServerAnswersTheHandshakeAndListsTools() async throws {
+    let server = MCPServer(allowTrash: false)
+    let hello = try #require(await server.handle(Data(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#.utf8)))
+    let reply = try #require(try JSONSerialization.jsonObject(with: hello) as? [String: Any])
+    #expect((reply["result"] as? [String: Any])?["protocolVersion"] as? String == "2025-06-18")
+    #expect(await server.handle(Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8)) == nil)
+    let list = try #require(await server.handle(Data(#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#.utf8)))
+    let tools = try #require(((try JSONSerialization.jsonObject(with: list) as? [String: Any])?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+    #expect(tools.contains { $0["name"] as? String == "show_photos" })
+    // Deleting is off, so "trash" isn't offered.
+    #expect(!String(decoding: list, as: UTF8.self).contains("\"trash\""))
+}

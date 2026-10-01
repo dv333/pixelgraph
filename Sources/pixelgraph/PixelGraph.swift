@@ -13,7 +13,8 @@ struct PixelGraph: AsyncParsableCommand {
             Nothing moves until you confirm, and every move can be undone.
             """,
         version: "0.2.0",
-        subcommands: [Home.self, Scan.self, Review.self, ReportCommand.self, Undo.self, Albums.self, Eval.self, DebugImages.self],
+        subcommands: [Home.self, Scan.self, Review.self, ReportCommand.self, Undo.self, Albums.self, Eval.self,
+                      MCPCommand.self, Auto.self, Schedule.self, DebugImages.self],
         defaultSubcommand: Home.self
     )
 }
@@ -139,12 +140,19 @@ struct Review: AsyncParsableCommand {
     @Option(help: .hidden)
     var folder: String?
 
+    @Flag(help: "Review the close calls the nightly clean-up left.")
+    var nightly = false
+
     func run() async throws {
         guard isatty(STDIN_FILENO) != 0, isatty(STDOUT_FILENO) != 0 else {
             throw ValidationError("pixelgraph review needs an interactive terminal.")
         }
-        let reportFolder = folder.map { URL(fileURLWithPath: $0) } ?? Paths.report
-        let runFile = folder == nil ? Paths.lastRun : reportFolder.appendingPathComponent("last-run.json")
+        var reportFolder = folder.map { URL(fileURLWithPath: $0) } ?? Paths.report
+        var runFile = folder == nil ? Paths.lastRun : reportFolder.appendingPathComponent("last-run.json")
+        if nightly {
+            reportFolder = Paths.nightlyReport
+            runFile = Paths.nightlyRun
+        }
         let run = try Run.load(from: runFile)
         guard !run.groups.isEmpty else {
             print("The last scan found no near-identical photos.")

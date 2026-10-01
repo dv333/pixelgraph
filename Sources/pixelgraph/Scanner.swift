@@ -14,6 +14,10 @@ struct Scanner {
         var describe = true
         /// Gather photos that look like rejects on their own into the Junk tab.
         var junk = true
+        /// Where the scan and its previews are saved: the usual place, or
+        /// the nightly run's own folder so it never overwrites a review in progress.
+        var runFile = Paths.lastRun
+        var reportFolder = Paths.report
     }
 
     let source: Source
@@ -23,11 +27,11 @@ struct Scanner {
     static let stages = ["Read photos", "Fingerprint", "Find documents", "Group lookalikes", "Score grouped photos",
                          "Check eyes and faces", "Tag scenes", "Pick the best shots", "Prepare previews"]
 
-    init(source: Source, options: Options, fullScreen: Bool = false) {
+    init(source: Source, options: Options, fullScreen: Bool = false, quiet: Bool = false) {
         self.source = source
         self.options = options
         let where_ = source.isPhotos ? "on this Mac, nothing uploaded" : source.kind.lowercased()
-        board = ProgressBoard(heading: "Scanning \(source)  ·  \(where_)", stages: Self.stages, fullScreen: fullScreen)
+        board = ProgressBoard(heading: "Scanning \(source)  ·  \(where_)", stages: Self.stages, fullScreen: fullScreen, quiet: quiet)
     }
 
     func run() async throws -> Run {
@@ -116,16 +120,16 @@ struct Scanner {
             // Not sorting documents: copies of the same document are still duplicates.
             run.groups += documentGroups.filter { $0.photos.count > 1 }
         }
-        try run.save()
+        try run.save(to: options.runFile)
 
         let previewCount = run.allGroups.reduce(0) { $0 + $1.photos.count }
         board.start(8, total: previewCount)
-        try await Report.write(run, items: lookup, offline: options.offline) { done, _ in board.advance(8, done: done) }
+        try await Report.write(run, items: lookup, offline: options.offline, in: options.reportFolder) { done, _ in board.advance(8, done: done) }
         board.finish(8, detail: "ready to review")
         board.setSummary(summary(groups: groups.count, moving: run.toMove.count, problems: problems.count,
                                  documents: run.documentGroups.map { $0.reduce(0) { $0 + $1.photos.count } } ?? 0))
         board.end()
-        Recents.record(run)
+        if options.runFile == Paths.lastRun { Recents.record(run) }
         return run
     }
 

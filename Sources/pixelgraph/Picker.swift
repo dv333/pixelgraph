@@ -193,6 +193,14 @@ enum Picker {
         }
     }
 
+    /// The same measures from a saved scan's members.
+    static func raws(_ members: [Run.Member]) -> [Raw] {
+        members.map {
+            Raw(aesthetic: $0.aesthetic, sharpness: $0.focus ?? $0.sharpness, faceCount: $0.faceCount,
+                faceQuality: $0.faceQuality, pixels: $0.width * $0.height, exposure: $0.exposure)
+        }
+    }
+
     static func score(_ group: [Photo], weights: Weights = .current()) -> [Score] {
         score(raws(group), weights: weights)
     }

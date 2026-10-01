@@ -16,8 +16,9 @@ enum Report {
         var full: String
     }
 
-    static func write(_ run: Run, items: [String: Item], offline: Bool, progress: (Int, Int) -> Void) async throws {
-        let folder = try resetFolder(Paths.report)
+    static func write(_ run: Run, items: [String: Item], offline: Bool, in reportFolder: URL = Paths.report,
+                      progress: (Int, Int) -> Void) async throws {
+        let folder = try resetFolder(reportFolder)
 
         // Grid thumbnails come from the Mac's local previews; the large copies
         // may need iCloud, like the re-scoring step.

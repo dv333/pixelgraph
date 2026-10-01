@@ -23,6 +23,10 @@ enum Paths {
     static let index = root.appendingPathComponent("index.sqlite")
     static let lastRun = root.appendingPathComponent("last-run.json")
     static let report = root.appendingPathComponent("report", isDirectory: true)
+    /// The nightly run's own scan and previews, apart from the one you review.
+    static let nightly = root.appendingPathComponent("nightly", isDirectory: true)
+    static var nightlyRun: URL { nightly.appendingPathComponent("last-run.json") }
+    static var nightlyReport: URL { nightly.appendingPathComponent("report", isDirectory: true) }
 }
 
 /// SQLite cache of Vision results, keyed by Photos' local identifier.
