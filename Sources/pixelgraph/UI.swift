@@ -196,14 +196,19 @@ final class UI: @unchecked Sendable {
                     rows = fitted
                 }
             }
-            if jpegs[key] == nil {
-                if !dim, large, let data = try? Data(contentsOf: url) {
-                    jpegs[key] = data
-                } else if let source = picture(url, maxSide: large ? 2048 : 480) {
-                    jpegs[key] = TerminalImage.jpeg(dim ? TerminalImage.darkened(source) ?? source : source)
+            // As many pixels as the box really has on screen (Retina included),
+            // so iTerm2 never has to stretch a small picture up.
+            let side = boxPixels(cols: cols, rows: rows)
+            let sized = key + "|\(side)"
+            if jpegs[sized] == nil {
+                let file = side > 720 ? larger(url) : url
+                if !dim, large, let data = try? Data(contentsOf: file) {
+                    jpegs[sized] = data
+                } else if let source = picture(file, maxSide: side) {
+                    jpegs[sized] = TerminalImage.jpeg(dim ? TerminalImage.darkened(source) ?? source : source)
                 }
             }
-            guard let data = jpegs[key] else { return at(row, col) + self.dim("no preview") }
+            guard let data = jpegs[sized] else { return at(row, col) + self.dim("no preview") }
             return TerminalImage.iTerm(data, row: row, col: col, cols: cols, rows: rows)
         }
         let blockKey = key + "|\(cols)x\(rows)"
@@ -228,6 +233,30 @@ final class UI: @unchecked Sendable {
         if let orientation = props[kCGImagePropertyOrientation] as? Int, orientation >= 5 { swap(&w, &h) }
         sizes[url.path] = (w, h)
         return (w, h)
+    }
+
+    /// The long side, in screen pixels, of a box of cells, rounded up to a
+    /// step of 128 so the cache isn't redone for every small resize. 480 when
+    /// the terminal doesn't say how big its cells are.
+    private func boxPixels(cols: Int, rows: Int) -> Int {
+        let window = term.pixelSize, size = term.size
+        guard window.width > 0, window.height > 0, size.cols > 0, size.rows > 0 else { return 480 }
+        let w = Double(cols) * Double(window.width) / Double(size.cols)
+        let h = Double(rows) * Double(window.height) / Double(size.rows)
+        // Terminals may report points rather than pixels; on a Retina display
+        // ask for the display's scale too (at worst a little more than needed).
+        let scale = CGDisplayCopyDisplayMode(CGMainDisplayID()).map { Double($0.pixelWidth) / Double(max(1, $0.width)) } ?? 1
+        let long = Int((max(w, h) * max(1, scale)).rounded(.up))
+        return min(2048, max(256, (long + 127) / 128 * 128))
+    }
+
+    /// The report keeps each photo twice: a 720px preview ("-s.jpg") and a
+    /// 2048px one ("-l.jpg"). Big boxes use the big one.
+    private func larger(_ url: URL) -> URL {
+        let name = url.lastPathComponent
+        guard name.hasSuffix("-s.jpg") else { return url }
+        let big = url.deletingLastPathComponent().appendingPathComponent(String(name.dropLast(6)) + "-l.jpg")
+        return FileManager.default.fileExists(atPath: big.path) ? big : url
     }
 
     private func picture(_ url: URL, maxSide: Int) -> CGImage? {
