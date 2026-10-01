@@ -117,9 +117,38 @@ private final class RackFocus {
     /// How far out of focus something gets per unit of depth.
     private let blur: Double
 
-    private static let palette: [(Double, Double, Double)] = [
-        (1, 0.69, 0.36), (1, 0.38, 0.29), (0.38, 0.81, 0.84), (1, 0.93, 0.82), (0.8, 0.87, 1),
-    ]
+    typealias Colour = (Double, Double, Double)
+
+    /// The colours, following the theme like OpenCode: blue lights on near-black
+    /// for dark terminals, purple lights on off-white for light ones.
+    private struct Look {
+        /// The lights: mostly the accent (0), a lighter (1) and a deeper (2)
+        /// shade, a few pale ones (3); 4 is the lights that become the name.
+        let palette: [Colour]
+        let backdrop: Colour
+        let name: Colour
+        let glow: Colour
+        let tagline: Colour
+        /// Lights add up on dark, and tint on light.
+        let blend: CGBlendMode
+        /// The edges fade toward black on dark and white on light.
+        let edge: Double
+
+        static let dark = Look(
+            palette: [(0.36, 0.61, 0.96), (0.62, 0.78, 1), (0.22, 0.38, 0.88), (0.92, 0.94, 1), (0.72, 0.84, 1)],
+            backdrop: (0.035, 0.035, 0.04), name: (0.96, 0.97, 1), glow: (0.36, 0.61, 0.96),
+            tagline: (0.85, 0.86, 0.9), blend: .plusLighter, edge: 0)
+        static let light = Look(
+            palette: [(0.49, 0.35, 0.78), (0.70, 0.58, 0.92), (0.34, 0.20, 0.62), (0.80, 0.78, 0.86), (0.42, 0.28, 0.72)],
+            backdrop: (0.98, 0.98, 0.98), name: (0.1, 0.1, 0.12), glow: (0.49, 0.35, 0.78),
+            tagline: (0.3, 0.3, 0.34), blend: .multiply, edge: 1)
+    }
+
+    private let look: Look
+
+    private static func cg(_ c: Colour, _ alpha: Double = 1) -> CGColor {
+        CGColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: alpha)
+    }
 
     init?(width: Int, height: Int) {
         self.width = width
@@ -130,24 +159,26 @@ private final class RackFocus {
         let W = Double(width), H = Double(height)
         let size = min(W * 0.1, H * 0.3)
 
+        let look = Theme.light ? Look.light : Look.dark
+        self.look = look
         guard let word = Self.text("pixelgraph", width: width, height: height, size: size, weight: .light,
-                                   color: CGColor(srgbRed: 0.96, green: 0.97, blue: 1, alpha: 1), y: H / 2),
-              let blue = Self.text("pixelgraph", width: width, height: height, size: size, weight: .light,
-                                   color: CGColor(srgbRed: 0.43, green: 0.59, blue: 1, alpha: 1), y: H / 2),
-              let glow = Self.soften(blue, 0.07),
+                                   color: Self.cg(look.name), y: H / 2),
+              let tinted = Self.text("pixelgraph", width: width, height: height, size: size, weight: .light,
+                                     color: Self.cg(look.glow), y: H / 2),
+              let glow = Self.soften(tinted, 0.07),
               let tagline = Self.text("EVERY MOMENT, ONCE", width: width, height: height, size: max(10, W * 0.0105),
-                                      weight: .regular, color: CGColor(srgbRed: 0.93, green: 0.91, blue: 0.89, alpha: 0.8),
+                                      weight: .regular, color: Self.cg(look.tagline, 0.8),
                                       y: H * 0.2, tracking: 0.32),
-              let vignette = Self.vignette(width, height),
-              let round = Self.roundSprite(Self.palette[4])
+              let vignette = Self.vignette(width, height, edge: look.edge),
+              let round = Self.roundSprite(look.palette[4])
         else { return nil }
         self.word = word
         self.glow = glow
         self.tagline = tagline
         self.vignette = vignette
         self.round = round
-        sprites = Self.palette.compactMap(Self.hexagon)
-        guard sprites.count == Self.palette.count else { return nil }
+        sprites = look.palette.compactMap(Self.hexagon)
+        guard sprites.count == look.palette.count else { return nil }
 
         // The lights that become the name: a grid sampled from it, set in heavier type so strokes aren't missed.
         let step = max(3.2, size / 15)
@@ -158,7 +189,7 @@ private final class RackFocus {
             dots.append((x + (random.next() - 0.5) * step * 0.3, y + (random.next() - 0.5) * step * 0.3,
                          0.5 + (random.next() - 0.5) * 0.05))
         }
-        // The city behind: warm mostly, a little red, teal and white.
+        // The lights behind: mostly the accent, some lighter, deeper and pale.
         let scale = W / 1100
         let choices = [0, 0, 0, 1, 2, 3]
         for _ in 0..<70 {
@@ -182,7 +213,7 @@ private final class RackFocus {
         // Lights, at half resolution, with a little focus breathing.
         bokeh.setBlendMode(.normal)
         bokeh.setAlpha(1)
-        bokeh.setFillColor(CGColor(srgbRed: 0.016, green: 0.024, blue: 0.043, alpha: 1))
+        bokeh.setFillColor(Self.cg(look.backdrop))
         bokeh.fill(CGRect(x: 0, y: 0, width: W / 2, height: H / 2))
         bokeh.saveGState()
         let breathe = 1 + 0.045 * (1 - settled)
@@ -190,7 +221,7 @@ private final class RackFocus {
         bokeh.translateBy(x: W / 2, y: H / 2)
         bokeh.scaleBy(x: breathe, y: breathe)
         bokeh.translateBy(x: -W / 2, y: -H / 2)
-        bokeh.setBlendMode(.plusLighter)
+        bokeh.setBlendMode(look.blend)
         for light in lights {
             let r = light.base + blur * abs(light.depth - focus) * 1.3
             let alpha = clamp(pow(light.base / r, 2) * 9, 0.03, 0.9) * fadeIn * (0.85 + 0.15 * sin(t * 2 + light.phase))
@@ -218,7 +249,7 @@ private final class RackFocus {
         main.interpolationQuality = .high
         if let lights = bokeh.makeImage() { main.draw(lights, in: full) }
         if crisp > 0 {
-            main.setBlendMode(.plusLighter)
+            main.setBlendMode(look.blend)
             main.setAlpha(0.55 * crisp)
             main.draw(glow, in: full)
             main.setBlendMode(.normal)
@@ -234,7 +265,7 @@ private final class RackFocus {
         main.draw(vignette, in: full)
         let out = clamp((t - (Self.duration - 0.3)) / 0.3)
         if out > 0 {
-            main.setFillColor(CGColor(gray: 0, alpha: out))
+            main.setFillColor(Self.cg(look.backdrop, out))
             main.fill(full)
         }
         return main.makeImage()
@@ -343,10 +374,10 @@ private final class RackFocus {
         return context.makeImage()
     }
 
-    private static func vignette(_ width: Int, _ height: Int) -> CGImage? {
+    private static func vignette(_ width: Int, _ height: Int, edge: Double) -> CGImage? {
         guard let context = makeContext(width, height),
               let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!,
-                                        colors: [CGColor(gray: 0, alpha: 0), CGColor(gray: 0, alpha: 0.5)] as CFArray,
+                                        colors: [CGColor(gray: edge, alpha: 0), CGColor(gray: edge, alpha: 0.5)] as CFArray,
                                         locations: [0, 1])
         else { return nil }
         let centre = CGPoint(x: Double(width) / 2, y: Double(height) / 2)
