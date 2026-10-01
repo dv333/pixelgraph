@@ -1,0 +1,111 @@
+import Foundation
+
+/// Moves photos to Duplicates and back.
+///
+/// Apple Photos: into the "PixelGraph Duplicates" album and out of the album
+/// that was scanned; nothing leaves the library. Folders and drives: into a
+/// "PixelGraph Duplicates" folder inside the scanned folder, keeping the
+/// layout, with RAW twins and sidecars alongside. Every move is logged so the
+/// last one can be undone.
+enum Mover {
+    struct Record: Codable {
+        var date: Date
+        var source: Source
+        /// Photo ids as they were before the move.
+        var ids: [String]
+        /// For folders: where each file went.
+        var files: [FileMove]
+    }
+
+    struct FileMove: Codable {
+        var from: String
+        var to: String
+    }
+
+    static var log: URL { Paths.root.appendingPathComponent("moves.json") }
+
+    static func move(_ ids: [String], from source: Source) async throws -> Record {
+        var record = Record(date: .now, source: source, ids: ids, files: [])
+        switch source {
+        case .album(let id, _):
+            try await Library.moveToDuplicates(ids, from: id)
+        case .dates:
+            try await Library.moveToDuplicates(ids, from: nil)
+        case .folder(let path):
+            // Resolve symlinks (/var → /private/var) so paths line up.
+            let root = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+            let destination = root.appendingPathComponent(Files.duplicatesFolder, isDirectory: true)
+            for id in ids where id.hasPrefix("file:") {
+                let file = URL(fileURLWithPath: String(id.dropFirst(5))).resolvingSymlinksInPath()
+                for url in [file] + Files.companions(of: file).map({ $0.resolvingSymlinksInPath() }) {
+                    let relative = url.path.hasPrefix(root.path + "/") ? String(url.path.dropFirst(root.path.count + 1)) : url.lastPathComponent
+                    let target = uniqueURL(destination.appendingPathComponent(relative))
+                    try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try FileManager.default.moveItem(at: url, to: target)
+                    record.files.append(FileMove(from: url.path, to: target.path))
+                }
+            }
+        }
+        var records = history()
+        records.append(record)
+        try save(records)
+        return record
+    }
+
+    /// Undoes the most recent move. Returns it, or nil when there's nothing to undo.
+    @discardableResult
+    static func undoLast() async throws -> Record? {
+        var records = history()
+        guard let record = records.popLast() else { return nil }
+        switch record.source {
+        case .album(let id, _): try await Library.restore(record.ids, to: id)
+        case .dates: try await Library.restore(record.ids, to: nil)
+        case .folder:
+            for move in record.files.reversed() {
+                let back = URL(fileURLWithPath: move.from)
+                try FileManager.default.createDirectory(at: back.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try FileManager.default.moveItem(at: URL(fileURLWithPath: move.to), to: back)
+                removeEmptyFolders(from: URL(fileURLWithPath: move.to).deletingLastPathComponent())
+            }
+        }
+        try save(records)
+        return record
+    }
+
+    static func history() -> [Record] {
+        guard let data = try? Data(contentsOf: log) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode([Record].self, from: data)) ?? []
+    }
+
+    private static func save(_ records: [Record]) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = .prettyPrinted
+        try encoder.encode(records.suffix(50)).write(to: log, options: .atomic)
+    }
+
+    /// `url`, or `url` with " 2", " 3"… added when something is already there.
+    private static func uniqueURL(_ url: URL) -> URL {
+        var candidate = url
+        var n = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            let name = url.deletingPathExtension().lastPathComponent + " \(n)"
+            candidate = url.deletingLastPathComponent().appendingPathComponent(name).appendingPathExtension(url.pathExtension)
+            n += 1
+        }
+        return candidate
+    }
+
+    /// Tidies up folders left empty under "PixelGraph Duplicates" after an undo.
+    private static func removeEmptyFolders(from folder: URL) {
+        var current = folder
+        while current.path.contains("/\(Files.duplicatesFolder)"),
+              let contents = try? FileManager.default.contentsOfDirectory(atPath: current.path),
+              contents.filter({ $0 != ".DS_Store" }).isEmpty {
+            try? FileManager.default.removeItem(at: current)
+            current = current.deletingLastPathComponent()
+        }
+    }
+}

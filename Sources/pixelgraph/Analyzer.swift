@@ -1,0 +1,113 @@
+import CoreGraphics
+import Vision
+
+/// What Vision measures about one photo. Stored in the index so later runs
+/// can regroup without looking at the pixels again.
+struct Analysis: Sendable {
+    /// Image fingerprint (Vision feature print). Similar photos have nearby vectors.
+    var vector: [Float]
+    /// Vision's overall aesthetics score, -1 (poor) … 1 (great).
+    var aesthetic: Float
+    /// Vision thinks this is a receipt, document, screenshot-like utility shot.
+    var isUtility: Bool
+    /// Laplacian variance; higher is sharper. Only comparable within a group.
+    var sharpness: Float
+    var faceCount: Int
+    /// Lowest face capture quality in the shot (0 … 1), so one bad face
+    /// (eyes closed, blurred, turned away) pulls the photo down. -1 when no faces.
+    var faceQuality: Float
+    /// How open the least-open eye in the shot is: eye height ÷ width, about
+    /// 0.25–0.35 open and under 0.12 closed. -1 when not measured or no faces.
+    var eyesOpen: Float = -1
+    /// Long side of the image this was measured on. Small means Photos only
+    /// had a local preview (original in iCloud), so sharpness is rougher.
+    var previewSide: Int
+}
+
+enum Analyzer {
+    /// Bump when the analysis changes so cached rows get recomputed.
+    static let version = 3
+
+    /// `fingerprint: false` skips the feature print, for re-scoring a photo
+    /// whose fingerprint is already known. `eyes` adds face landmarks to
+    /// measure eye openness (only worth it for grouped photos).
+    static func analyze(_ image: CGImage, fingerprint: Bool = true, eyes: Bool = false) async throws -> Analysis {
+        let handler = ImageRequestHandler(image)
+        let (aesthetics, faces) = try await handler.perform(
+            CalculateImageAestheticsScoresRequest(),
+            DetectFaceCaptureQualityRequest()
+        )
+        let vector = fingerprint ? floats(from: try await handler.perform(GenerateImageFeaturePrintRequest())) : []
+        let qualities = faces.compactMap { $0.captureQuality?.score }
+        return Analysis(
+            vector: vector,
+            aesthetic: aesthetics.overallScore,
+            isUtility: aesthetics.isUtility,
+            sharpness: sharpness(of: image),
+            faceCount: faces.count,
+            faceQuality: qualities.min() ?? -1,
+            eyesOpen: eyes && !faces.isEmpty ? try await eyeOpenness(image, handler: handler) : -1,
+            previewSide: max(image.width, image.height)
+        )
+    }
+
+    private static func eyeOpenness(_ image: CGImage, handler: ImageRequestHandler) async throws -> Float {
+        let size = CGSize(width: image.width, height: image.height)
+        var lowest: Float = -1
+        for face in try await handler.perform(DetectFaceLandmarksRequest()) {
+            guard let landmarks = face.landmarks else { continue }
+            for eye in [landmarks.leftEye, landmarks.rightEye] {
+                let points = eye.pointsInImageCoordinates(size)
+                guard points.count >= 4 else { continue }
+                let xs = points.map(\.x), ys = points.map(\.y)
+                let width = xs.max()! - xs.min()!
+                guard width > 0 else { continue }
+                let ratio = Float((ys.max()! - ys.min()!) / width)
+                lowest = lowest < 0 ? ratio : min(lowest, ratio)
+            }
+        }
+        return lowest
+    }
+
+    private static func floats(from print: FeaturePrintObservation) -> [Float] {
+        print.data.withUnsafeBytes { raw in
+            switch print.elementType {
+            case .double: return raw.bindMemory(to: Double.self).prefix(print.elementCount).map(Float.init)
+            default: return Array(raw.bindMemory(to: Float.self).prefix(print.elementCount))
+            }
+        }
+    }
+
+    /// Variance of the Laplacian on a 512px grayscale copy, a standard blur measure.
+    private static func sharpness(of image: CGImage) -> Float {
+        let scale = min(1, 512 / CGFloat(max(image.width, image.height)))
+        let w = max(3, Int(CGFloat(image.width) * scale))
+        let h = max(3, Int(CGFloat(image.height) * scale))
+        var pixels = [UInt8](repeating: 0, count: w * h)
+        let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(
+                data: buffer.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+            context.interpolationQuality = .medium
+            context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard drawn else { return 0 }
+
+        var sum: Float = 0, sumSquares: Float = 0
+        for y in 1..<(h - 1) {
+            for x in 1..<(w - 1) {
+                let i = y * w + x
+                let center = Float(pixels[i]) * 4
+                let around = Float(pixels[i - 1]) + Float(pixels[i + 1]) + Float(pixels[i - w]) + Float(pixels[i + w])
+                let value = (around - center) / 255
+                sum += value
+                sumSquares += value * value
+            }
+        }
+        let n = Float((w - 2) * (h - 2))
+        let mean = sum / n
+        return sumSquares / n - mean * mean
+    }
+}

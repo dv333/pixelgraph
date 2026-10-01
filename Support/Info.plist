@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>dev.pixelgraph.cli</string>
+	<key>CFBundleName</key>
+	<string>pixelgraph</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>PixelGraph finds near-identical photos and keeps the best. It only moves photos into a Duplicates album when you ask.</string>
+</dict>
+</plist>

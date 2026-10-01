@@ -1,0 +1,226 @@
+import ArgumentParser
+import CoreGraphics
+import Darwin
+import Foundation
+import ImageIO
+
+/// Raw-mode terminal: full-screen alternate buffer, keys and mouse clicks.
+final class Terminal: @unchecked Sendable {
+    enum Key: Equatable {
+        case left, right, up, down, escape, enter, backspace, quit, resize
+        case char(Character)
+        /// 1-based screen position of a left click.
+        case click(row: Int, col: Int)
+    }
+
+    private var original = termios()
+    private var lastSize = (cols: 0, rows: 0)
+
+    var size: (cols: Int, rows: Int) {
+        var ws = winsize()
+        guard ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0, ws.ws_col > 0 else { return (80, 24) }
+        return (Int(ws.ws_col), Int(ws.ws_row))
+    }
+
+    func enter() {
+        tcgetattr(STDIN_FILENO, &original)
+        var raw = original
+        raw.c_lflag &= ~tcflag_t(ECHO | ICANON | ISIG | IEXTEN)
+        raw.c_iflag &= ~tcflag_t(IXON | ICRNL)
+        raw.c_cc.16 = 1  // VMIN
+        raw.c_cc.17 = 0  // VTIME
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw)
+        lastSize = size
+        // Alternate screen, hide cursor, report mouse clicks (SGR encoding).
+        write("\u{1B}[?1049h\u{1B}[?25l\u{1B}[?1000h\u{1B}[?1006h")
+    }
+
+    /// Lets ctrl-c stop the program (during a scan) or arrive as a key (the rest of the time).
+    func allowInterrupt(_ allowed: Bool) {
+        var current = termios()
+        tcgetattr(STDIN_FILENO, &current)
+        if allowed { current.c_lflag |= tcflag_t(ISIG) } else { current.c_lflag &= ~tcflag_t(ISIG) }
+        tcsetattr(STDIN_FILENO, TCSANOW, &current)
+    }
+
+    func leave() {
+        write("\u{1B}[?1000l\u{1B}[?1006l\u{1B}[0m\u{1B}[?25h\u{1B}[?1049l")
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &original)
+    }
+
+    func write(_ text: String) {
+        var data = Data(text.utf8)
+        data.withUnsafeMutableBytes { buffer in
+            var offset = 0
+            while offset < buffer.count {
+                let n = Darwin.write(STDOUT_FILENO, buffer.baseAddress! + offset, buffer.count - offset)
+                if n <= 0 { break }
+                offset += n
+            }
+        }
+    }
+
+    /// Blocks until a key, click or window resize.
+    func nextKey() -> Key {
+        while true {
+            if size != lastSize {
+                lastSize = size
+                return .resize
+            }
+            guard wait(200), let byte = readByte() else { continue }
+            switch byte {
+            case 0x1B:
+                if let key = escapeSequence() { return key }
+            case 0x03, 0x04: return .quit  // Ctrl-C, Ctrl-D
+            case 0x0D, 0x0A: return .enter
+            case 0x7F, 0x08: return .backspace
+            case 0x20...0x7E: return .char(Character(UnicodeScalar(byte)))
+            default: continue
+            }
+        }
+    }
+
+    private func escapeSequence() -> Key? {
+        guard wait(30), let next = readByte() else { return .escape }
+        guard next == UInt8(ascii: "[") || next == UInt8(ascii: "O") else { return .escape }
+        var params: [UInt8] = []
+        while wait(30), let byte = readByte() {
+            guard !(0x40...0x7E).contains(byte) else { return csi(params, final: byte) }
+            params.append(byte)
+        }
+        return .escape
+    }
+
+    private func csi(_ params: [UInt8], final: UInt8) -> Key? {
+        if params.first == UInt8(ascii: "<") {
+            // Mouse: ESC [ < button ; col ; row M (press) or m (release)
+            let parts = String(decoding: params.dropFirst(), as: UTF8.self).split(separator: ";").compactMap { Int($0) }
+            guard final == UInt8(ascii: "M"), parts.count == 3, parts[0] == 0 else { return nil }
+            return .click(row: parts[2], col: parts[1])
+        }
+        switch final {
+        case UInt8(ascii: "C"): return .right
+        case UInt8(ascii: "D"): return .left
+        case UInt8(ascii: "A"): return .up
+        case UInt8(ascii: "B"): return .down
+        default: return nil
+        }
+    }
+
+    private func wait(_ milliseconds: Int32) -> Bool {
+        var fd = pollfd(fd: STDIN_FILENO, events: Int16(POLLIN), revents: 0)
+        return poll(&fd, 1, milliseconds) > 0
+    }
+
+    private func readByte() -> UInt8? {
+        var byte: UInt8 = 0
+        return read(STDIN_FILENO, &byte, 1) == 1 ? byte : nil
+    }
+}
+
+/// Draws photos into terminal cells.
+enum TerminalImage {
+    enum Mode: String, CaseIterable, ExpressibleByArgument {
+        case auto, iterm, blocks
+
+        /// iTerm2 shows real images; other true-colour terminals get blocks.
+        var sharp: Bool {
+            switch self {
+            case .iterm: return true
+            case .blocks: return false
+            case .auto:
+                let env = ProcessInfo.processInfo.environment
+                return env["LC_TERMINAL"] == "iTerm2" || env["TERM_PROGRAM"] == "iTerm.app"
+            }
+        }
+    }
+
+    /// The same picture, darkened: how photos selected to move look.
+    static func darkened(_ image: CGImage) -> CGImage? {
+        guard let context = CGContext(
+            data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        context.draw(image, in: rect)
+        context.setFillColor(CGColor(gray: 0, alpha: 0.6))
+        context.fill(rect)
+        return context.makeImage()
+    }
+
+    /// iTerm2 inline image placed at a cell, scaled to fit `cols` × `rows`.
+    static func iTerm(_ data: Data, row: Int, col: Int, cols: Int, rows: Int) -> String {
+        "\u{1B}[\(row);\(col)H\u{1B}]1337;File=inline=1;width=\(cols);height=\(rows);preserveAspectRatio=1;size=\(data.count):\(data.base64EncodedString())\u{07}"
+    }
+
+    /// Colour blocks: each cell shows two pixels with "▀" (top in the
+    /// foreground colour, bottom in the background colour). Letterboxed
+    /// cells keep the terminal's own background.
+    /// `dim` darkens the picture, for rejected photos.
+    static func blocks(_ image: CGImage, cols: Int, rows: Int, dim: Bool = false) -> [String] {
+        let w = max(1, cols), h = max(2, rows * 2)
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        let scale = min(Double(w) / Double(image.width), Double(h) / Double(image.height))
+        let size = CGSize(width: Double(image.width) * scale, height: Double(image.height) * scale)
+        let rect = CGRect(x: (Double(w) - size.width) / 2, y: (Double(h) - size.height) / 2,
+                          width: size.width, height: size.height).integral
+        pixels.withUnsafeMutableBytes { buffer in
+            guard let context = CGContext(
+                data: buffer.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return }
+            context.interpolationQuality = .high
+            context.draw(image, in: rect)
+        }
+
+        func color(_ x: Int, _ y: Int) -> (Int, Int, Int)? {
+            let i = (y * w + x) * 4
+            guard pixels[i + 3] >= 128 else { return nil }
+            let k = dim ? 0.35 : 1
+            return (Int(Double(pixels[i]) * k), Int(Double(pixels[i + 1]) * k), Int(Double(pixels[i + 2]) * k))
+        }
+
+        var lines: [String] = []
+        for row in 0..<rows {
+            var line = ""
+            var fg: (Int, Int, Int)?, bg: (Int, Int, Int)?, bgDefault = true
+            func setFG(_ c: (Int, Int, Int)) {
+                if fg == nil || fg! != c { line += "\u{1B}[38;2;\(c.0);\(c.1);\(c.2)m"; fg = c }
+            }
+            func setBG(_ c: (Int, Int, Int)?) {
+                if let c {
+                    if bgDefault || bg! != c { line += "\u{1B}[48;2;\(c.0);\(c.1);\(c.2)m"; bg = c; bgDefault = false }
+                } else if !bgDefault {
+                    line += "\u{1B}[49m"; bgDefault = true; bg = nil
+                }
+            }
+            for x in 0..<w {
+                switch (color(x, row * 2), color(x, row * 2 + 1)) {
+                case (nil, nil): setBG(nil); line += " "
+                case let (top?, nil): setBG(nil); setFG(top); line += "▀"
+                case let (nil, bottom?): setBG(nil); setFG(bottom); line += "▄"
+                case let (top?, bottom?): setBG(bottom); setFG(top); line += "▀"
+                }
+            }
+            lines.append(line + "\u{1B}[0m")
+        }
+        return lines
+    }
+
+    /// A small JPEG for iTerm2 so redrawing a screen of thumbnails stays quick.
+    static func jpeg(_ image: CGImage) -> Data? {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.75] as CFDictionary)
+        return CGImageDestinationFinalize(destination) ? data as Data : nil
+    }
+
+    static func load(_ url: URL, maxSide: Int) -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxSide,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+        ] as CFDictionary)
+    }
+}
