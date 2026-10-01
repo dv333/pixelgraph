@@ -31,6 +31,8 @@ enum Mover {
         var deleted: Bool?
         /// Still in the scanned album, because it can't be changed.
         var leftInSource: Bool?
+        /// Captions written to the photos kept, with what they had before.
+        var captions: [Captions.Change]?
     }
 
     struct FileMove: Codable {
@@ -73,17 +75,33 @@ enum Mover {
         return record
     }
 
-    /// Undoes the most recent move (all of it, if it went to two places).
-    /// Returns the photo ids put back and those that were deleted, which only
-    /// Photos can recover; nil when there's nothing to undo.
+    /// Logs captions written alongside a move, so undoing it puts the old ones back.
+    static func logCaptions(_ changes: [Captions.Change], source: Source, batch: UUID) throws {
+        guard !changes.isEmpty else { return }
+        var records = history()
+        records.append(Record(date: .now, source: source, destination: nil, batch: batch, ids: [], files: [], captions: changes))
+        try save(records)
+    }
+
+    /// Undoes the most recent move (all of it, if it went to two places),
+    /// and the captions written with it. Returns the photo ids put back,
+    /// those that were deleted, which only Photos can recover, and those
+    /// whose captions were restored; nil when there's nothing to undo.
     @discardableResult
-    static func undoLast() async throws -> (source: Source, ids: [String], deleted: [String])? {
+    static func undoLast() async throws -> (source: Source, ids: [String], deleted: [String], captioned: [String])? {
         var records = history()
         guard let last = records.last else { return nil }
         var undone: [String] = []
         var deleted: [String] = []
+        var captioned: [String] = []
         while let record = records.last, record.batch == last.batch, record.batch != nil || record.date == last.date {
             records.removeLast()
+            if let captions = record.captions {
+                try await Captions.restore(captions)
+                captioned += captions.map(\.id)
+                try save(records)
+                continue
+            }
             if record.deleted == true {
                 deleted += record.ids
                 try save(records)
@@ -104,7 +122,7 @@ enum Mover {
             undone += record.ids
             try save(records)
         }
-        return (last.source, undone, deleted)
+        return (last.source, undone, deleted, captioned)
     }
 
     static func history() -> [Record] {

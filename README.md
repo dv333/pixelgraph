@@ -76,6 +76,15 @@ Photos in groups get a one-line description from Apple's on-device model ("Famil
 - **Apple Photos, library scans:** duplicates are added to "PixelGraph Duplicates" and deleted from the library, so they go to Recently Deleted for 30 days (macOS asks first). Recover them there; `pixelgraph undo` can't. Documents stay in the library, in "PGDocuments".
 - **Folders and drives:** into a "PixelGraph Duplicates" (or "PGDocuments") folder inside the scanned folder, keeping the folder layout. RAW+JPEG pairs and `.xmp`/`.aae` sidecars move together.
 
+### Descriptions for the photos you keep
+
+When you move a group's extra copies, the photos you keep get a title, a caption and keywords, so searching Photos (or Spotlight, for folders) for "sunset" or "beach" finds them. Apple's on-device model writes the title and caption, leaving people out; Vision adds scene keywords. Without Apple Intelligence only keywords are written.
+
+- **Apple Photos:** written through the Photos app, since apps can't set these directly. The first time, macOS asks to let your terminal control Photos.
+- **Folders and drives:** written into the file's own metadata (XMP) for JPEG, HEIC, PNG and TIFF; the image itself isn't touched.
+
+New text goes after anything already there ("Mom's birthday · Candles on a chocolate cake"), and undo puts back what was there before. A progress bar shows while it runs.
+
 ### iCloud
 
 With **Optimize Mac Storage** on, most originals live in iCloud. PixelGraph groups photos using the previews already on your Mac, then downloads only the photos that ended up in a group, to judge sharpness and faces properly. iCloud Drive files are fingerprinted from their thumbnails and downloaded the same way. `--offline` never downloads.

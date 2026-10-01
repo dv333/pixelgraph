@@ -132,6 +132,37 @@ enum Insight {
         }
     }
 
+    @Generable
+    struct Caption {
+        @Guide(description: "A short title, at most 6 words, e.g. 'Sunset over Ocean Beach'. No people or names.")
+        var title: String
+        @Guide(description: "One or two vivid sentences someone might search for: the place, scene, objects, activity, light, season and mood. Never mention or describe people. Don't start with 'This photo'.")
+        var caption: String
+        @Guide(description: "Up to 8 lowercase search keywords of one or two words: kind of place, objects, activity, season, colours. No people.")
+        var keywords: [String]
+    }
+
+    /// A title, caption and keywords for Photos search, leaving people out; nil without Apple Intelligence.
+    static func caption(_ image: CGImage) async -> Caption? {
+        let session = LanguageModelSession(instructions: """
+            You write titles, captions and keywords for personal photos so they're easy to find by \
+            searching. Describe the place, scene and what's happening. Never mention people, faces or names.
+            """)
+        do {
+            var caption = try await session.respond(generating: Caption.self) {
+                "Write a title, caption and keywords for this photo."
+                Attachment(image).label("photo")
+            }.content
+            caption.title = caption.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            caption.caption = caption.caption.trimmingCharacters(in: .whitespacesAndNewlines)
+            caption.keywords = caption.keywords.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+                .filter { !$0.isEmpty }.prefix(8).map { $0 }
+            return caption
+        } catch {
+            return nil
+        }
+    }
+
     /// Scene tags from Vision's built-in classifier: fast, no model needed.
     static func sceneTags(_ image: CGImage, limit: Int = 4) async -> [String] {
         guard let labels = try? await ImageRequestHandler(image).perform(ClassifyImageRequest()) else { return [] }

@@ -172,9 +172,11 @@ struct Undo: AsyncParsableCommand {
         guard let record = try await Mover.undoLast() else { return }
         if var run = try? Run.load(), run.source == record.source {
             run.unmark(record.ids)
+            run.markCaptioned(record.captioned, false)
             try run.save()
         }
         if !record.ids.isEmpty { print("Put back \(record.ids.count) photos in \(record.source).") }
+        if !record.captioned.isEmpty { print("Put back the old captions on \(record.captioned.count) kept photos.") }
         if !record.deleted.isEmpty {
             print("\(record.deleted.count) photos were deleted; recover them in Photos → Recently Deleted.")
         }
@@ -209,6 +211,20 @@ extension Run {
     }
 
     /// Reverses `markMoved` after an undo.
+    /// Marks kept photos as having had a caption written, or not.
+    mutating func markCaptioned(_ ids: [String], _ captioned: Bool = true) {
+        let set = Set(ids)
+        func mark(_ list: inout [Group]) {
+            for g in list.indices {
+                for p in list[g].photos.indices where set.contains(list[g].photos[p].id) {
+                    list[g].photos[p].captioned = captioned ? true : nil
+                }
+            }
+        }
+        mark(&groups)
+        if documentGroups != nil { mark(&documentGroups!) }
+    }
+
     mutating func unmark(_ ids: [String]) {
         let set = Set(ids)
         for g in groups.indices { groups[g].pick.moved.removeAll { set.contains($0) } }

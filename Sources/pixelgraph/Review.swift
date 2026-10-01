@@ -15,7 +15,7 @@ final class ReviewSession {
     private let fromHome: Bool
 
     private enum Screen { case groups, group, photo, compare }
-    private enum Sheet { case reason, confirm(file: [String], duplicates: [String]), help }
+    private enum Sheet { case reason, confirm(file: [String], duplicates: [String], describe: [String]), help }
     private enum Overview { case mosaic, filmstrip }
     private enum Hit { case group(Int), photo(Int), more }
 
@@ -219,11 +219,11 @@ final class ReviewSession {
             }
         case .help:
             sheet = nil
-        case .confirm(let file, let duplicates):
+        case .confirm(let file, let duplicates, let describe):
             switch key {
             case .enter, .char("y"):
                 sheet = nil
-                await move(file: file, duplicates: duplicates)
+                await move(file: file, duplicates: duplicates, describe: describe)
             case .escape, .backspace, .click, .char("n"): sheet = nil
             default: break
             }
@@ -405,16 +405,43 @@ final class ReviewSession {
             toast = ui.dim("Nothing selected to move.")
             return
         }
-        sheet = .confirm(file: file, duplicates: selected)
+        // The photos kept in the groups something is leaving, not yet captioned.
+        let leaving = Set(selected + file)
+        let describe = tab == .duplicates
+            ? scope.filter { g in g.photos.contains { leaving.contains($0.id) } }
+                .flatMap { g in g.photos.filter { g.pick.isKept($0.id) && !g.pick.moved.contains($0.id) && $0.captioned != true }.map(\.id) }
+            : []
+        sheet = .confirm(file: file, duplicates: selected, describe: describe)
     }
 
-    private func move(file: [String], duplicates: [String]) async {
+    private func move(file: [String], duplicates: [String], describe keepers: [String]) async {
+        func count(_ n: Int) -> String { "\(n) photo\(n == 1 ? "" : "s")" }
+        let deletes: Bool
+        if case .dates = source { deletes = true } else { deletes = false }
+        let total = (file.isEmpty ? 0 : 1) + (duplicates.isEmpty ? 0 : 1) + keepers.count
+        var done = 0
+        func step(_ detail: String) { showProgress(done: done, total: total, detail: detail) }
+        defer { needsFull = true }
         do {
             let batch = UUID()
             var records: [Mover.Record] = []
-            if !file.isEmpty { records.append(try await Mover.move(file, from: source, to: .documents, batch: batch)) }
-            if !duplicates.isEmpty { records.append(try await Mover.move(duplicates, from: source, to: .duplicates, batch: batch)) }
+            if !file.isEmpty {
+                step("Filing \(count(file.count)) in PGDocuments…")
+                records.append(try await Mover.move(file, from: source, to: .documents, batch: batch))
+                done += 1
+            }
+            if !duplicates.isEmpty {
+                step(deletes ? "Deleting \(count(duplicates.count))…" : "Moving \(count(duplicates.count)) to Duplicates…")
+                records.append(try await Mover.move(duplicates, from: source, to: .duplicates, batch: batch))
+                done += 1
+            }
             run.markMoved(file + duplicates)
+            let base = done
+            let (captioned, captionError) = await writeCaptions(keepers, batch: batch) { n in
+                done = base + n
+                step("Describing kept photo \(n + 1) of \(keepers.count)…")
+            }
+            run.markCaptioned(captioned)
             history.append(.move(file + duplicates))
             dirty = true
             needsFull = true
@@ -425,15 +452,50 @@ final class ReviewSession {
                 parts.append(records.contains { $0.deleted == true }
                              ? "deleted \(duplicates.count) to Recently Deleted" : "moved \(duplicates.count) to Duplicates")
             }
+            if !captioned.isEmpty { parts.append("described \(captioned.count) kept") }
             var message = ui.green("✓") + " " + parts.joined(separator: ", ").capitalizedFirst
             if case .album(let id, let name) = source, records.contains(where: { $0.leftInSource == true }) {
                 message += ui.amber(" · still in \(name) too: it’s \(Library.readOnlyReason(id) ?? "read-only")")
             }
-            if records.contains(where: { $0.deleted != true }) { message += " · " + ui.blue("u") + ui.dim(" undo") }
+            if let captionError { message += ui.amber(" · couldn’t describe: \(captionError.localizedDescription)") }
+            if records.contains(where: { $0.deleted != true }) || !captioned.isEmpty { message += " · " + ui.blue("u") + ui.dim(" undo") }
             toast = message
         } catch {
             toast = ui.red("Couldn't move: \(error.localizedDescription)")
         }
+    }
+
+    /// Writes a caption, title and keywords to the photos kept, logged with
+    /// the move's batch so undo puts the old ones back. Stops at the first
+    /// failure, usually no permission to control Photos.
+    private func writeCaptions(_ ids: [String], batch: UUID,
+                               progress: (Int) -> Void) async -> (written: [String], error: Error?) {
+        guard !ids.isEmpty else { return ([], nil) }
+        let items = Items.lookup(ids)
+        let useModel = Picker.modelAvailable
+        var changes: [Captions.Change] = []
+        var failure: Error?
+        for (n, id) in ids.enumerated() {
+            progress(n)
+            guard let item = items[id], let fields = await Captions.make(item, useModel: useModel) else { continue }
+            do {
+                if let change = try await Captions.write(fields, to: id) { changes.append(change) }
+            } catch {
+                failure = error
+                break
+            }
+        }
+        do { try Mover.logCaptions(changes, source: source, batch: batch) } catch { failure = failure ?? error }
+        return (changes.map(\.id), failure)
+    }
+
+    /// A sheet with a progress bar, drawn straight away while a move runs.
+    private func showProgress(done: Int, total: Int, detail: String) {
+        let fraction = total == 0 ? 1 : Double(done) / Double(total)
+        let percent = "\(Int((fraction * 100).rounded()))%"
+        let width = min(ui.cols - 2, 60) - 4
+        ui.term.write(ui.sheet([ui.bold(detail), "",
+                                ProgressBoard.bar(fraction, width: max(4, width - percent.count - 2)) + "  " + ui.dim(percent)]))
     }
 
     /// Undoes the last thing you did: a mark, or a move (this session's, or
@@ -455,12 +517,14 @@ final class ReviewSession {
         do {
             guard let undone = try await Mover.undoLast() else { return }
             run.unmark(undone.ids)
+            run.markCaptioned(undone.captioned, false)
             dirty = true
             needsFull = true
             save()
             func count(_ n: Int) -> String { "\(n) photo\(n == 1 ? "" : "s")" }
             var parts: [String] = []
             if !undone.ids.isEmpty { parts.append(ui.green("✓") + " Put back \(count(undone.ids.count))") }
+            if !undone.captioned.isEmpty { parts.append(ui.green("✓") + " Old captions back on \(count(undone.captioned.count))") }
             if !undone.deleted.isEmpty {
                 parts.append(ui.amber("\(count(undone.deleted.count)) deleted: recover in Photos → Recently Deleted"))
             }
@@ -524,7 +588,7 @@ final class ReviewSession {
         out += toastLine()
         switch sheet {
         case .reason: out += reasonSheet()
-        case .confirm(let file, let duplicates): out += confirmSheet(file: file, duplicates: duplicates)
+        case .confirm(let file, let duplicates, let describe): out += confirmSheet(file: file, duplicates: duplicates, describe: describe)
         case .help: out += helpSheet()
         case nil: break
         }
@@ -1107,7 +1171,7 @@ final class ReviewSession {
         return ui.sheet(lines)
     }
 
-    private func confirmSheet(file: [String], duplicates: [String]) -> String {
+    private func confirmSheet(file: [String], duplicates: [String], describe: [String]) -> String {
         func count(_ n: Int) -> String { "\(n) photo\(n == 1 ? "" : "s")" }
         var title: String
         let deletes: Bool
@@ -1151,8 +1215,12 @@ final class ReviewSession {
         }
         var lines = [ui.bold(title), ""]
         lines += detail.map { ui.dim($0) }
+        if !describe.isEmpty {
+            lines += ["", ui.dim("The \(count(describe.count)) you keep get a caption, title and"),
+                      ui.dim(source.isPhotos ? "keywords in Photos, after what’s already there." : "keywords in their files, after what’s already there.")]
+        }
         let total = file.count + duplicates.count
-        lines += ["", ui.spread("", ui.dim("esc Cancel   ") + ui.button("enter \(file.isEmpty ? "Move" : "File") \(total)"), width: min(ui.cols - 2, 64) - 4)]
+        lines += ["", ui.spread("", ui.dim("esc Cancel   ") + ui.button("enter \(file.isEmpty ? (deletes ? "Delete" : "Move") : "File") \(total)"), width: min(ui.cols - 2, 64) - 4)]
         return ui.sheet(lines, width: 68)
     }
 

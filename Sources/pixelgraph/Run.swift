@@ -57,6 +57,8 @@ struct Run: Codable {
         var document: String?
         var excerpt: String?
         var sameText: Double?
+        /// A caption, title and keywords were written to it when kept.
+        var captioned: Bool?
     }
 
     /// Best first, then kept photos, then the ones moving, moved last.

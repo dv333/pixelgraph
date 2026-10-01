@@ -137,7 +137,7 @@ final class ProgressBoard: @unchecked Sendable {
             if stage.total > 0 {
                 let barWidth = max(10, min(40, width - 24 - 34))
                 let fraction = Double(stage.done) / Double(stage.total)
-                text += bar(fraction, width: barWidth) + "  " + "\(stage.done)/\(stage.total)"
+                text += Self.bar(fraction, width: barWidth) + "  " + "\(stage.done)/\(stage.total)"
                 if let left = remaining(stage) { text += dim("  " + left) }
             } else if !stage.detail.isEmpty {
                 text += dim(stage.detail)
@@ -148,7 +148,7 @@ final class ProgressBoard: @unchecked Sendable {
 
     /// A rounded bar drawn with eighth-blocks so it moves smoothly, in a blue
     /// that brightens toward the leading edge.
-    private func bar(_ fraction: Double, width: Int) -> String {
+    static func bar(_ fraction: Double, width: Int) -> String {
         let eighths = Int((max(0, min(1, fraction)) * Double(width * 8)).rounded())
         let full = eighths / 8, part = eighths % 8
         var out = ""

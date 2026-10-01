@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 import Testing
 @testable import pixelgraph
 
@@ -235,4 +236,34 @@ struct MoveTests {
         #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("receipt.jpg").path))
         #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("receipt copy.jpg").path))
     }
+}
+
+@Test func captionsAppendAfterWhatsThere() {
+    let old = Captions.Fields(caption: "Mom's birthday", title: "Party", keywords: ["family", "Cake"])
+    let new = Captions.Fields(caption: "Candles on a chocolate cake.", title: "Birthday cake", keywords: ["cake", "candles"])
+    let both = Captions.appending(new, to: old)
+    #expect(both.caption == "Mom's birthday · Candles on a chocolate cake.")
+    #expect(both.title == "Party · Birthday cake")
+    #expect(both.keywords == ["family", "Cake", "candles"])
+    #expect(Captions.appending(new, to: both) == both)
+}
+
+@Test func captionsGoIntoTheFileAndUndoPutsTheOldOnesBack() async throws {
+    let folder = try scratchFolder()
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let url = folder.appendingPathComponent("beach.jpg")
+    let context = CGContext(data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+    let destination = CGImageDestinationCreateWithURL(url as CFURL, "public.jpeg" as CFString, 1, nil)!
+    CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+    #expect(CGImageDestinationFinalize(destination))
+
+    let id = Item.fileID(url)
+    let fields = Captions.Fields(caption: "Waves at sunset.", title: "Ocean Beach", keywords: ["beach", "sunset"])
+    let change = try await Captions.write(fields, to: id)
+    #expect(change?.old == Captions.Fields())
+    #expect(Captions.read(url) == fields)
+
+    try await Captions.restore([change!])
+    #expect(Captions.read(url) == Captions.Fields())
 }
