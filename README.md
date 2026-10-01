@@ -128,6 +128,22 @@ Then ask, for example, "scan my photos from last month and show me the close cal
 
 `pixelgraph schedule --at 02:00 --now` runs `pixelgraph auto` every night through launchd. It scans the last 30 days into its own workspace (never your review in progress), moves only the clear cases to PGDuplicates (extra copies of the same picture, and burst shots well behind the best or flagged, when the best is clean), never deletes, caps a night at 300 photos, and sends a notification. Close calls wait for you (`pixelgraph review --nightly`) or for an assistant: add `--assistant claude` or `--assistant codex` to let Claude Code or Codex settle them with deleting switched off. `--now` runs it once straight away so macOS can ask for Photos access while you're there. `pixelgraph schedule --off` stops it; `pixelgraph undo` puts back the last move.
 
+### Fully automatic, with a local model
+
+A vision model running on your Mac through [Ollama](https://ollama.com) can settle the close calls and borderline junk the nightly run would otherwise leave for you. Nothing leaves the Mac.
+
+1. `ollama pull qwen2.5vl:32b` (about 21 GB; with less than 32 GB of memory use `qwen2.5vl:7b`).
+2. Check it against your own past decisions first: `pixelgraph eval --judge-model qwen2.5vl:32b`. It shows how often the model's pick was your ★ and, more importantly, how often the nightly rule would have matched you, and says whether it's safe enough.
+3. `pixelgraph schedule --at 02:00 --judge-model qwen2.5vl:32b`.
+
+The model moves photos only when it picks the same shot as PixelGraph with at least 85% confidence (`--judge-confidence`); anything it says is a different moment worth keeping stays. Junk moves to PGJunk only when the model also calls it junk that surely. Everything else still waits for you. Nothing is deleted: once a month, when photos have waited 30 days in PGDuplicates or PGJunk, a notification suggests `pixelgraph empty`, which asks before sending them to Recently Deleted or the Trash.
+
+**OpenCode.** To drive PixelGraph from [OpenCode](https://opencode.ai) with any model, local ones included, add to `~/.config/opencode/opencode.json`:
+```json
+{ "mcp": { "pixelgraph": { "type": "local", "command": ["/usr/local/bin/pixelgraph", "mcp"], "enabled": true } } }
+```
+For the nightly run, `--assistant opencode` hands the remaining close calls to `opencode run`, with PixelGraph's tools added and deleting switched off; it uses the model your OpenCode config names.
+
 ### iCloud
 
 With **Optimize Mac Storage** on, most originals live in iCloud. PixelGraph groups photos using the previews already on your Mac, then downloads only the photos that ended up in a group, to judge sharpness and faces properly. iCloud Drive files are fingerprinted from their thumbnails and downloaded the same way. `--offline` never downloads.

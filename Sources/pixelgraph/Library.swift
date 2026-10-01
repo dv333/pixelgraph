@@ -142,6 +142,13 @@ enum Library {
         return removable
     }
 
+    /// The ids of the photos in an album.
+    static func assetIDs(in album: PHAssetCollection) -> [String] {
+        var ids: [String] = []
+        PHAsset.fetchAssets(in: album, options: nil).enumerateObjects { asset, _, _ in ids.append(asset.localIdentifier) }
+        return ids
+    }
+
     /// Deletes photos from the library: they go to Recently Deleted for 30
     /// days, and macOS asks first (turning it down throws, changing nothing).
     static func delete(_ ids: [String]) async throws {

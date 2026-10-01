@@ -14,7 +14,7 @@ struct PixelGraph: AsyncParsableCommand {
             """,
         version: "0.2.0",
         subcommands: [Home.self, Scan.self, Review.self, ReportCommand.self, Undo.self, Albums.self, Eval.self,
-                      MCPCommand.self, Auto.self, Schedule.self, DebugImages.self],
+                      MCPCommand.self, Auto.self, Schedule.self, Empty.self, DebugImages.self],
         defaultSubcommand: Home.self
     )
 }

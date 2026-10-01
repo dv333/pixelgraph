@@ -109,6 +109,11 @@ enum Mover {
         var records = history()
         records.append(record)
         try save(records)
+        // Remember when things landed in PGDuplicates and PGJunk, for the monthly clear-out.
+        if target == .duplicates || target == .junk {
+            let landed = record.files.isEmpty ? ids : record.files.map { "file:" + $0.to }
+            Staged.add(landed, place: record.place ?? target.album)
+        }
         return record
     }
 
@@ -156,6 +161,7 @@ enum Mover {
                 }
             }
             undone += record.ids
+            Staged.remove(record.ids + record.files.map { "file:" + $0.to })
             try save(records)
         }
         return (last.source, undone, deleted, captioned)

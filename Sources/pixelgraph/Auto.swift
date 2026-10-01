@@ -17,15 +17,24 @@ struct Auto: AsyncParsableCommand {
     @Flag(help: "Show what would move without moving anything.")
     var dryRun = false
 
-    @Option(help: "Then let an assistant settle the close calls: claude or codex.")
+    @Option(help: "Then let an assistant settle the close calls: claude, codex or opencode.")
     var assistant: String?
+
+    @Option(help: "Ask a local vision model through Ollama about the close calls and junk, e.g. qwen2.5vl:32b.")
+    var judgeModel: String?
+
+    @Option(help: "How sure the local model must be (0–1) before its agreement moves anything.")
+    var judgeConfidence = 0.85
 
     @Option(help: "Scan this folder instead of the Photos library.")
     var folder: String?
 
     func validate() throws {
-        if let assistant, !["claude", "codex"].contains(assistant) { throw ValidationError("--assistant is claude or codex.") }
+        if let assistant, !Self.assistants.contains(assistant) { throw ValidationError("--assistant is claude, codex or opencode.") }
+        guard (0...1).contains(judgeConfidence) else { throw ValidationError("--judge-confidence is between 0 and 1.") }
     }
+
+    static let assistants = ["claude", "codex", "opencode"]
 
     func run() async throws {
         let started = Date.now
@@ -38,11 +47,21 @@ struct Auto: AsyncParsableCommand {
         }
         let run = try await Agent.scan(source, into: .nightly, quiet: isatty(STDOUT_FILENO) == 0)
         let moved = try await Agent.move(.nightly, groups: nil, to: .duplicates, dryRun: dryRun, clearOnly: true, limit: limit)
+        var judged: Agent.Judged?
+        if let judgeModel {
+            judged = try await Agent.judgeAndMove(.nightly, judge: Judge(model: judgeModel), threshold: judgeConfidence,
+                                                  limit: max(0, limit - moved.photos), dryRun: dryRun)
+        }
         let after = (try? Run.load(from: Agent.Workspace.nightly.runFile)) ?? run
         let closeCalls = Agent.places(after, pendingOnly: true).filter { !$0.junk }.count
         let junk = (after.junkGroups ?? []).count
 
         var summary = dryRun ? "Would move \(moved.photos) clear duplicates" : "Moved \(moved.photos) clear duplicates to PGDuplicates"
+        if let judged {
+            summary += " · the local model agreed on \(judged.agreed) of \(judged.asked) close calls"
+                + " (\(judged.photos) more to PGDuplicates, \(judged.junk) to PGJunk)"
+            if let problem = judged.problems.first { summary += " · model problem: \(problem)" }
+        }
         summary += closeCalls > 0 ? " · \(closeCalls) close call\(closeCalls == 1 ? "" : "s") to look at" : " · nothing else to decide"
         if junk > 0 { summary += " · \(junk) junk group\(junk == 1 ? "" : "s")" }
         print(summary)
@@ -52,12 +71,27 @@ struct Auto: AsyncParsableCommand {
             "date": started.formatted(.iso8601), "scope": run.scope, "scanned": run.scanned,
             "moved": moved.photos, "dry_run": dryRun, "close_calls": closeCalls, "junk_groups": junk, "summary": summary,
         ]
+        if let judged { entry["judge"] = ["asked": judged.asked, "agreed": judged.agreed, "photos": judged.photos, "junk": judged.junk] }
         if let assistant, closeCalls > 0, !dryRun {
             entry["assistant"] = assistant
             entry["assistant_exit"] = Int(ask(assistant, closeCalls: closeCalls))
         }
         Agent.writeNightlyLog(entry)
         notify(summary)
+        remindToEmpty()
+    }
+
+    /// Once a month, when photos have sat in PGDuplicates or PGJunk for 30
+    /// days, a notification suggests `pixelgraph empty`. Nothing is deleted
+    /// until you say so there.
+    private func remindToEmpty() {
+        let marker = Paths.nightly.appendingPathComponent("last-reminder")
+        let last = (try? String(contentsOf: marker, encoding: .utf8)).flatMap { try? Date($0, strategy: .iso8601) } ?? .distantPast
+        guard Date.now.timeIntervalSince(last) >= 30 * 86_400 else { return }
+        let waiting = Staged.older(than: 30).count
+        guard waiting > 0 else { return }
+        notify("\(waiting) photos have waited 30 days in PGDuplicates or PGJunk. Run pixelgraph empty to clear them out.")
+        try? Date.now.formatted(.iso8601).write(to: marker, atomically: true, encoding: .utf8)
     }
 
     /// Hands the close calls to Claude Code or Codex, running here with
@@ -75,9 +109,18 @@ struct Auto: AsyncParsableCommand {
         let config = Agent.json(["mcpServers": ["pixelgraph": server]])
         let tools = ["list_groups", "show_photos", "set_pick", "move"].map { "mcp__pixelgraph__\($0)" }.joined(separator: ",")
         let command: String
+        var extra: [String: String] = [:]
         switch assistant {
         case "claude":
             command = #"claude -p "$PG_PROMPT" --mcp-config "$PG_MCP" --allowedTools "$PG_TOOLS""#
+        case "opencode":
+            // OpenCode reads an extra config file named by OPENCODE_CONFIG, on top of
+            // your own (which says which model, e.g. a local one through Ollama).
+            let config = Paths.nightly.appendingPathComponent("opencode.json")
+            let local: JSON = ["type": "local", "command": [me, "mcp", "--no-trash"], "enabled": true]
+            try? Agent.json(["mcp": ["pixelgraph": local]]).write(to: config, atomically: true, encoding: .utf8)
+            extra["OPENCODE_CONFIG"] = config.path
+            command = #"opencode run "$PG_PROMPT""#
         default:
             command = #"codex exec -c "mcp_servers.pixelgraph.command=\"$PG_ME\"" -c 'mcp_servers.pixelgraph.args=["mcp","--no-trash"]' "$PG_PROMPT""#
         }
@@ -89,6 +132,7 @@ struct Auto: AsyncParsableCommand {
         environment["PG_MCP"] = config
         environment["PG_TOOLS"] = tools
         environment["PG_ME"] = me
+        environment.merge(extra) { _, new in new }
         process.environment = environment
         do {
             try process.run()
@@ -120,8 +164,11 @@ struct Schedule: ParsableCommand {
     @Option(help: "Look at photos taken in the last this many days.")
     var days = 30
 
-    @Option(help: "Let an assistant settle the close calls: claude or codex.")
+    @Option(help: "Let an assistant settle the close calls: claude, codex or opencode.")
     var assistant: String?
+
+    @Option(help: "Ask a local vision model through Ollama about close calls and junk, e.g. qwen2.5vl:32b.")
+    var judgeModel: String?
 
     @Flag(help: "Run it once right now as well, so macOS can ask for Photos access while you're here.")
     var now = false
@@ -132,7 +179,7 @@ struct Schedule: ParsableCommand {
     static let label = "dev.pixelgraph.nightly"
 
     func validate() throws {
-        if let assistant, !["claude", "codex"].contains(assistant) { throw ValidationError("--assistant is claude or codex.") }
+        if let assistant, !Auto.assistants.contains(assistant) { throw ValidationError("--assistant is claude, codex or opencode.") }
         guard parse(at) != nil else { throw ValidationError("Give the time as HH:MM, e.g. 02:00.") }
     }
 
@@ -157,6 +204,7 @@ struct Schedule: ParsableCommand {
         try FileManager.default.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
         var arguments = [me, "auto", "--days", String(days)]
         if let assistant { arguments += ["--assistant", assistant] }
+        if let judgeModel { arguments += ["--judge-model", judgeModel] }
         let log = Paths.nightly.appendingPathComponent("auto.log").path
         let job: [String: Any] = [
             "Label": Self.label,
@@ -195,5 +243,58 @@ struct Schedule: ParsableCommand {
         } catch {
             return -1
         }
+    }
+}
+
+/// `pixelgraph empty`: deletes what has waited in PGDuplicates and PGJunk for
+/// a month, after asking. Photos go to Recently Deleted (recoverable for 30
+/// days), files to the Trash. Anything you've taken back out of those albums
+/// or folders since is left alone.
+struct Empty: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Clear out PGDuplicates and PGJunk after they've waited a while (asks first).")
+
+    @Option(help: "Only what has waited at least this many days.")
+    var olderThan = 30
+
+    @Flag(help: "Don't ask; for scripts.")
+    var yes = false
+
+    func run() async throws {
+        let entries = Staged.older(than: olderThan)
+        var photos: [String] = [], files: [URL] = [], gone: [String] = []
+        let library = entries.filter { !$0.id.hasPrefix("file:") }
+        if !library.isEmpty {
+            try await Library.requestAccess()
+            // Still in the album it was moved to? Then it's still meant to go.
+            for (place, group) in Dictionary(grouping: library, by: \.place) {
+                let members = Library.album(named: place).map { Set(Library.assetIDs(in: $0)) } ?? []
+                for entry in group { if members.contains(entry.id) { photos.append(entry.id) } else { gone.append(entry.id) } }
+            }
+        }
+        for entry in entries where entry.id.hasPrefix("file:") {
+            let url = URL(fileURLWithPath: String(entry.id.dropFirst(5)))
+            if FileManager.default.fileExists(atPath: url.path) { files.append(url) } else { gone.append(entry.id) }
+        }
+        Staged.remove(gone)
+        guard !photos.isEmpty || !files.isEmpty else {
+            print("Nothing has waited \(olderThan) days in PGDuplicates or PGJunk.")
+            return
+        }
+        print("\(photos.count) photos (Photos library) and \(files.count) files have waited \(olderThan)+ days in PGDuplicates or PGJunk.")
+        print("Photos go to Recently Deleted for 30 days; files go to the Trash.")
+        if !yes {
+            print("Delete them? [y/N] ", terminator: "")
+            guard let answer = readLine()?.lowercased(), answer == "y" || answer == "yes" else {
+                print("Nothing deleted.")
+                return
+            }
+        }
+        if !photos.isEmpty { try await Library.delete(photos) }
+        var trashed: [String] = []
+        for url in files where (try? FileManager.default.trashItem(at: url, resultingItemURL: nil)) != nil {
+            trashed.append("file:" + url.path)
+        }
+        Staged.remove(photos + trashed)
+        print("Deleted \(photos.count) photos and \(trashed.count) files.")
     }
 }

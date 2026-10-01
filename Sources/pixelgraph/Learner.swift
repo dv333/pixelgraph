@@ -110,8 +110,83 @@ struct Eval: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Measure PixelGraph against your past review decisions.")
 
+    @Option(help: "Also test a local vision model through Ollama against your decisions, e.g. qwen2.5vl:32b.")
+    var judgeModel: String?
+
+    @Option(help: "The confidence the nightly run would require (0–1).")
+    var judgeConfidence = 0.85
+
+    @Option(help: "Test on at most this many reviewed groups (each takes a few seconds).")
+    var limit = 40
+
     func run() async throws {
         Swift.print(Self.report())
+        if let judgeModel {
+            Swift.print("\n" + (try await Self.judgeReport(Judge(model: judgeModel), threshold: judgeConfidence, limit: limit)))
+        }
+    }
+
+    /// How the local model's picks compare with yours, and what the nightly
+    /// rule (model and PixelGraph agree, confidently) would have done.
+    static func judgeReport(_ judge: Judge, threshold: Double, limit: Int) async throws -> String {
+        let entries = Decisions.load().values
+            .filter { $0.kind != .junk && $0.suggested != nil && !$0.chosen.isEmpty && (2...6).contains($0.members.count) }
+            .sorted { $0.date > $1.date }
+        let junk = Decisions.load().values.filter { $0.kind == .junk }
+        if entries.contains(where: { !$0.members[0].id.hasPrefix("file:") }) || junk.contains(where: { !$0.members[0].id.hasPrefix("file:") }) {
+            try await Library.requestAccess()
+        }
+        var tested = 0, modelRight = 0, pixelgraphRight = 0, autoMoved = 0, autoRight = 0
+        for entry in entries.prefix(limit) {
+            guard let images = await Judge.images(entry.members) else { continue }
+            let choice = try await judge.choose(images)
+            guard let pick = try? Agent.photoIndexIn(entry.members, choice.best) else { continue }
+            tested += 1
+            let modelID = entry.members[pick].id
+            if entry.chosen.contains(modelID) { modelRight += 1 }
+            if entry.chosen.contains(entry.suggested!) { pixelgraphRight += 1 }
+            if modelID == entry.suggested, choice.confidence >= threshold {
+                autoMoved += 1
+                if entry.chosen.contains(modelID) { autoRight += 1 }
+            }
+        }
+        var junkTested = 0, junkCalled = 0, junkRight = 0
+        for entry in junk {
+            for member in entry.members where junkTested < limit {
+                guard let image = await Judge.images([member])?.first else { continue }
+                let verdict = try await judge.judgeJunk(image)
+                junkTested += 1
+                if verdict.junk, verdict.confidence >= threshold {
+                    junkCalled += 1
+                    if entry.moving.contains(member.id) { junkRight += 1 }
+                }
+            }
+        }
+        func percent(_ part: Int, _ whole: Int) -> String {
+            whole == 0 ? "–" : String(format: "%3.0f%%  (%ld of %ld)", 100 * Double(part) / Double(whole), part, whole)
+        }
+        var lines = ["Local model: \(judge.model), needing \(Int(threshold * 100))% confidence"]
+        guard tested + junkTested > 0 else {
+            return (lines + ["  Nothing to test yet: review some groups first."]).joined(separator: "\n")
+        }
+        lines += [
+            "  Groups tested                             \(tested)",
+            "  model's pick was your ★                   " + percent(modelRight, tested),
+            "  PixelGraph's pick was your ★              " + percent(pixelgraphRight, tested),
+            "  nightly would settle on its own           " + percent(autoMoved, tested),
+            "    …and matched you                        " + percent(autoRight, autoMoved),
+        ]
+        if junkTested > 0 {
+            lines += [
+                "  Junk photos tested                        \(junkTested)",
+                "  model called junk (would move)            " + percent(junkCalled, junkTested),
+                "    …and you moved it too                   " + percent(junkRight, junkCalled),
+            ]
+        }
+        let ok = autoMoved == 0 || Double(autoRight) / Double(autoMoved) >= 0.95
+        lines.append(ok ? "  Safe enough for the nightly run: pixelgraph schedule --judge-model \(judge.model)"
+                        : "  Not yet trustworthy for the nightly run; try a larger model or a higher --judge-confidence.")
+        return lines.joined(separator: "\n")
     }
 
     /// The whole evaluation as text, for the terminal and for assistants.

@@ -111,6 +111,12 @@ enum Agent {
         return i
     }
 
+    /// The index of a lettered photo in a list of members.
+    static func photoIndexIn(_ members: [Run.Member], _ letter: String) throws -> Int {
+        guard let i = members.indices.first(where: { self.letter($0) == letter.uppercased() }) else { throw Failure("No photo \(letter).") }
+        return i
+    }
+
     static func places(_ run: Run, pendingOnly: Bool) -> [Place] {
         let all = run.groups.indices.map { Place(junk: false, index: $0) }
             + (run.junkGroups ?? []).indices.map { Place(junk: true, index: $0) }
@@ -312,5 +318,120 @@ enum Agent {
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
         else { return "\(object)" }
         return String(decoding: data, as: UTF8.self)
+    }
+}
+
+extension Agent {
+    struct Judged {
+        var asked = 0
+        var agreed = 0
+        var photos = 0
+        var junk = 0
+        var problems: [String] = []
+    }
+
+    /// The nightly second opinion: for each close call still waiting, the
+    /// local model picks the best; when it picks the same shot as PixelGraph
+    /// with at least `threshold` confidence, the rest move to PGDuplicates
+    /// (anything it says is a different moment worth keeping stays). Junk
+    /// moves to PGJunk only when the model also calls it junk that surely.
+    /// Everything else waits for a person.
+    static func judgeAndMove(_ workspace: Workspace, judge: Judge, threshold: Double, limit: Int, dryRun: Bool) async throws -> Judged {
+        var run = try Run.load(from: workspace.runFile)
+        guard let source = run.source else { throw Failure("This scan is too old to judge; scan again.") }
+        var result = Judged()
+        var copies: [String] = [], junk: [String] = []
+        for place in places(run, pendingOnly: true) where copies.count + junk.count < limit {
+            var g = group(run, place)
+            let waiting = g.photos.filter { g.pick.willMove($0.id) }
+            if place.junk {
+                for member in waiting where copies.count + junk.count < limit {
+                    guard let image = await Judge.images([member])?.first else { continue }
+                    result.asked += 1
+                    do {
+                        let verdict = try await judge.judgeJunk(image)
+                        if verdict.junk, verdict.confidence >= threshold { junk.append(member.id); result.agreed += 1 }
+                    } catch {
+                        result.problems.append(error.localizedDescription)
+                        if result.problems.count >= 3 { break }
+                    }
+                }
+                continue
+            }
+            // Bigger groups are a lot to show at once; they wait for a person.
+            guard g.photos.count <= 6, g.kind != .scene, let images = await Judge.images(g.photos) else { continue }
+            result.asked += 1
+            let choice: Judge.Choice
+            do {
+                choice = try await judge.choose(images)
+            } catch {
+                result.problems.append(error.localizedDescription)
+                if result.problems.count >= 3 { break }
+                continue
+            }
+            guard let best = g.photos.firstIndex(where: { $0.id == g.pick.best }), choice.best == letter(best),
+                  choice.confidence >= threshold else { continue }
+            result.agreed += 1
+            for name in choice.keep ?? [] {
+                if let i = try? photoIndex(name, in: g), i != best, !g.pick.isKept(g.photos[i].id) { g.pick.kept.append(g.photos[i].id) }
+            }
+            update(&run, place, g)
+            copies += g.photos.map(\.id).filter { g.pick.willMove($0) }
+        }
+        result.photos = copies.count
+        result.junk = junk.count
+        guard !dryRun else { return result }
+        try run.save(to: workspace.runFile)
+        guard !copies.isEmpty || !junk.isEmpty else { return result }
+        if source.isPhotos { try await Library.requestAccess() }
+        let batch = UUID()
+        if !copies.isEmpty { _ = try await Mover.move(copies, from: source, to: .duplicates, batch: batch) }
+        if !junk.isEmpty { _ = try await Mover.move(junk, from: source, to: .junk, batch: batch) }
+        run.markMoved(copies + junk)
+        try run.save(to: workspace.runFile)
+        return result
+    }
+}
+
+/// What's waiting in PGDuplicates and PGJunk, and since when, so the monthly
+/// reminder and `pixelgraph empty` know what has sat there 30 days.
+enum Staged {
+    struct Entry: Codable {
+        /// A Photos id, or "file:" and where the file is now.
+        var id: String
+        var place: String
+        var date: Date
+    }
+
+    static var file: URL { Paths.root.appendingPathComponent("staged.json") }
+
+    static func load() -> [Entry] {
+        guard let data = try? Data(contentsOf: file) else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode([Entry].self, from: data)) ?? []
+    }
+
+    static func save(_ entries: [Entry]) {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try? encoder.encode(entries).write(to: file, options: .atomic)
+    }
+
+    static func add(_ ids: [String], place: String) {
+        guard !ids.isEmpty else { return }
+        let now = Date.now
+        save(load() + ids.map { Entry(id: $0, place: place, date: now) })
+    }
+
+    static func remove(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        let gone = Set(ids)
+        save(load().filter { !gone.contains($0.id) })
+    }
+
+    /// Entries that have waited at least `days`.
+    static func older(than days: Int, now: Date = .now) -> [Entry] {
+        load().filter { now.timeIntervalSince($0.date) >= Double(days) * 86_400 }
     }
 }
