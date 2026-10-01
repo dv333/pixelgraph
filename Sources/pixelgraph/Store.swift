@@ -82,6 +82,25 @@ final class Store {
                 reason TEXT NOT NULL
             )
             """)
+        try exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        // Folder photos used to be measured from the tiny thumbnail embedded
+        // in many JPEGs: forget those measurements once, so they're redone
+        // from the real image. Photos-library rows are untouched.
+        if !hasMeta("file-thumbnails-fixed") {
+            try transaction {
+                for table in ["photos", "detail", "extras", "suggestions"] {
+                    try exec("DELETE FROM \(table) WHERE id LIKE 'file:%'")
+                }
+                try exec("INSERT OR REPLACE INTO meta VALUES ('file-thumbnails-fixed', '1')")
+            }
+        }
+    }
+
+    private func hasMeta(_ key: String) -> Bool {
+        guard let statement = prepare("SELECT 1 FROM meta WHERE key = ?") else { return false }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_text(statement, 1, key, -1, SQLITE_TRANSIENT)
+        return sqlite3_step(statement) == SQLITE_ROW
     }
 
     deinit { sqlite3_close(db) }

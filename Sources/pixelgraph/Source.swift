@@ -276,8 +276,11 @@ enum Files {
 
     static func thumbnail(_ url: URL, maxSide: CGFloat) -> CGImage? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        // Always from the image itself: many JPEGs carry a tiny embedded
+        // thumbnail (often 160×120) that "if absent" would use instead,
+        // leaving previews and measurements blurry.
         return CGImageSourceCreateThumbnailAtIndex(source, 0, [
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceThumbnailMaxPixelSize: maxSide,
             kCGImageSourceCreateThumbnailWithTransform: true,
         ] as CFDictionary)
