@@ -162,16 +162,19 @@ final class ProgressBoard: @unchecked Sendable {
         }
     }
 
-    /// A rounded bar drawn with eighth-blocks so it moves smoothly, in a blue
-    /// that brightens toward the leading edge.
+    /// A rounded bar drawn with eighth-blocks so it moves smoothly, in the
+    /// accent colour (purple on light, blue on dark), brightening from a
+    /// deeper shade toward the leading edge.
     static func bar(_ fraction: Double, width: Int) -> String {
         let eighths = Int((max(0, min(1, fraction)) * Double(width * 8)).rounded())
         let full = eighths / 8, part = eighths % 8
+        let accent = Theme.accent
         var out = ""
         for i in 0..<full {
             let t = Double(i) / Double(max(1, width - 1))
-            let (r, g, b) = (Int(10 + 90 * t), Int(110 + 70 * t), 255)
-            out += "\u{1B}[38;2;\(r);\(g);\(b)m█"
+            // From 75% of the accent at the start to the accent itself at the end.
+            func shade(_ c: Int) -> Int { Int(Double(c) * (0.75 + 0.25 * t)) }
+            out += Theme.fg((shade(accent.r), shade(accent.g), shade(accent.b))) + "█"
         }
         if part > 0 { out += Theme.fg(Theme.blue) + ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"][part] }
         let used = full + (part > 0 ? 1 : 0)
