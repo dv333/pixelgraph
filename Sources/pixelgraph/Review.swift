@@ -33,6 +33,11 @@ final class ReviewSession {
     private var hits: [(rows: ClosedRange<Int>, cols: ClosedRange<Int>, hit: Hit)] = []
     private var toast: String?
     private var dirty = false
+    /// Every group was reviewed already, so finishing isn't noted again.
+    private var finished = false
+    /// Settings when the review opened: what enter does in the move sheet,
+    /// and whether kept photos are described.
+    private let settings = Settings.load()
 
     init(run: Run, runFile: URL = Paths.lastRun, folder: URL = Paths.report,
          graphics: TerminalImage.Mode = .auto, ui: UI? = nil) throws {
@@ -42,6 +47,7 @@ final class ReviewSession {
         self.images = try Report.manifest(in: folder)
         self.ui = ui ?? UI(graphics: graphics)
         self.fromHome = ui != nil
+        finished = run.reviewedGroups == run.allGroups.count
     }
 
     private var source: Source { run.source ?? .dates(from: nil, to: nil) }
@@ -69,6 +75,8 @@ final class ReviewSession {
     }
 
     private var hasDocuments: Bool { !(run.documentGroups ?? []).isEmpty }
+    /// Settings say enter in the move sheet deletes.
+    private var deleteByDefault: Bool { settings[.moveDefault] == "Delete" }
     private var junkCount: Int { (run.junkGroups ?? []).reduce(0) { $0 + $1.photos.count } }
     /// Photos from the junk groups, which move to PGJunk rather than PGDuplicates.
     private var junkIDs: Set<String> { Set((run.junkGroups ?? []).flatMap { $0.photos.map(\.id) }) }
@@ -90,6 +98,7 @@ final class ReviewSession {
                 print(moving > 0 ? "\(moving) photos still selected to move. Run `pixelgraph review` to finish." : "All done.")
             }
         }
+        Places.note(.opened, run.source)
         draw()
         while true {
             let key = ui.term.nextKey()
@@ -108,6 +117,10 @@ final class ReviewSession {
         try? Report.render(run, images: images, in: folder)
         Decisions.record(run)
         dirty = false
+        if !finished, run.reviewedGroups == run.allGroups.count {
+            finished = true
+            Places.note(.reviewed, run.source)
+        }
     }
 
     // MARK: - Input
@@ -303,7 +316,11 @@ final class ReviewSession {
             break
         case .confirm(let file, let duplicates, let describe):
             switch key {
-            case .enter, .char("y"), .char("p"):
+            case .enter, .char("y"):
+                sheet = nil
+                let target: Mover.Destination = deleteByDefault && !duplicates.isEmpty ? .trash : .duplicates
+                await move(file: file, duplicates: duplicates, to: target, describe: describe)
+            case .char("p"):
                 sheet = nil
                 await move(file: file, duplicates: duplicates, to: .duplicates, describe: describe)
             case .char("d") where !duplicates.isEmpty:
@@ -593,7 +610,7 @@ final class ReviewSession {
         }
         // The photos kept in the groups something is leaving, not yet captioned.
         let leaving = Set(selected + file)
-        let describe = tab == .duplicates
+        let describe = tab == .duplicates && settings.bool(.moveDescribe)
             ? scope.filter { g in g.photos.contains { leaving.contains($0.id) } }
                 .flatMap { g in g.photos.filter { g.pick.isKept($0.id) && !g.pick.moved.contains($0.id) && $0.captioned != true }.map(\.id) }
             : []
@@ -683,7 +700,7 @@ final class ReviewSession {
                                progress: (Int) -> Void) async -> (written: [String], error: Error?) {
         guard !ids.isEmpty else { return ([], nil) }
         let items = Items.lookup(ids)
-        let useModel = Picker.modelAvailable
+        let useModel = settings.bool(.model) && Picker.modelAvailable
         var changes: [Captions.Change] = []
         var failure: Error?
         for (n, id) in ids.enumerated() {
@@ -1467,8 +1484,11 @@ final class ReviewSession {
             let junkIDs = self.junkIDs
             let junk = duplicates.filter { junkIDs.contains($0) }.count
             let into = junk == 0 ? "PGDuplicates" : junk == duplicates.count ? "PGJunk" : "PGDuplicates, junk to PGJunk"
-            lines += [ui.blue("enter") + "  Move to \(into)"] + ui.wrap(keep, width: width - 7, lines: 2).map { "       " + ui.dim($0) }
-            lines += ["", ui.blue("d") + "      Delete"] + ui.wrap(gone, width: width - 7, lines: 2).map { "       " + ui.dim($0) }
+            let moveLines = [ui.blue(deleteByDefault ? "p    " : "enter") + "  Move to \(into)"]
+                + ui.wrap(keep, width: width - 7, lines: 2).map { "       " + ui.dim($0) }
+            let deleteLines = [ui.blue(deleteByDefault ? "enter" : "d    ") + "  Delete"]
+                + ui.wrap(gone, width: width - 7, lines: 2).map { "       " + ui.dim($0) }
+            lines += deleteByDefault ? deleteLines + [""] + moveLines : moveLines + [""] + deleteLines
         }
         if !file.isEmpty, !source.isPhotos {
             lines += ["", ui.dim("Documents go into “\(Files.documentsFolder)” inside the folder.")]
@@ -1477,8 +1497,10 @@ final class ReviewSession {
             lines += ["", ui.dim("The \(count(describe.count)) you keep get a caption, title and"),
                       ui.dim(source.isPhotos ? "keywords in Photos, after what’s already there." : "keywords in their files, after what’s already there.")]
         }
-        let hints = ui.dim(duplicates.isEmpty ? "esc Cancel   " : "esc Cancel   d Delete   ")
-        let action = duplicates.isEmpty ? "enter File \(file.count)" : "enter Move \(duplicates.count + file.count)"
+        let hints = ui.dim(duplicates.isEmpty ? "esc Cancel   " : deleteByDefault ? "esc Cancel   p Move   " : "esc Cancel   d Delete   ")
+        let action = duplicates.isEmpty ? "enter File \(file.count)"
+            : deleteByDefault ? "enter Delete \(duplicates.count)" + (file.isEmpty ? "" : ", file \(file.count)")
+            : "enter Move \(duplicates.count + file.count)"
         lines += ["", ui.spread("", hints + ui.button(action), width: width)]
         return ui.sheet(lines, width: 68)
     }

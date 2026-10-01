@@ -45,13 +45,15 @@ struct GroupingRules: Sendable, Codable {
     /// scene revisited. Stricter, so a year of couch photos doesn't collapse
     /// into one group.
     var sceneThreshold: Float
+    /// Photos taken this far apart (metres) aren't the same shot unless
+    /// they're copies; 0 turns it off. Nil in scans saved before it could change.
+    var farApartMetres: Double? = nil
 
     /// Copies and re-saves: this close a fingerprint, or this few hash bits
     /// apart at the same shape, count as the same picture wherever and whenever.
     static let copyDistance: Float = 0.1
     static let copyHashBits = 4
-    /// Photos taken this far apart (metres) aren't the same shot unless they're copies.
-    static let farApartMetres: Double = 2_000
+    static let defaultFarApart: Double = 2_000
 
     /// The allowed distance slides smoothly from the moment threshold to the
     /// scene threshold as photos get further apart in time, instead of
@@ -75,9 +77,10 @@ struct GroupingRules: Sendable, Codable {
     }
 
     /// Taken in clearly different places.
-    static func farApart(_ a: Photo, _ b: Photo) -> Bool {
-        guard let la = a.location, let lb = b.location else { return false }
-        return la.distance(to: lb) > farApartMetres
+    func farApart(_ a: Photo, _ b: Photo) -> Bool {
+        let limit = farApartMetres ?? Self.defaultFarApart
+        guard limit > 0, let la = a.location, let lb = b.location else { return false }
+        return la.distance(to: lb) > limit
     }
 }
 
@@ -128,7 +131,7 @@ enum Grouper {
                         edges.append(Edge(i: i, j: j, distance: dist, needsCheck: false))
                         continue
                     }
-                    guard dist <= rules.threshold(a, b), !GroupingRules.farApart(a, b) else { continue }
+                    guard dist <= rules.threshold(a, b), !rules.farApart(a, b) else { continue }
                     let apart = abs(a.date.timeIntervalSince(b.date)) > rules.momentWindow
                     edges.append(Edge(i: i, j: j, distance: dist, needsCheck: apart))
                 }
@@ -152,7 +155,7 @@ enum Grouper {
             let dist = m.distance(i, j)
             if linked.contains(pair), GroupingRules.isCopy(photos[i], photos[j], distance: dist) { return 0 }
             let threshold = rules.threshold(photos[i], photos[j])
-            guard threshold > 0, !GroupingRules.farApart(photos[i], photos[j]) else { return .infinity }
+            guard threshold > 0, !rules.farApart(photos[i], photos[j]) else { return .infinity }
             return dist / threshold
         }
         var groupOf = Array(0..<photos.count)

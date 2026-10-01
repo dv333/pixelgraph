@@ -12,10 +12,12 @@ struct Scanner {
         var documents = true
         /// Tag what's in the photos in groups (Vision scene tags; fast).
         var describe = true
+        /// Close calls taken apart in time must line up at least this well.
+        var pixelCheck = Verifier.minimumSimilarity
         /// Gather photos that look like rejects on their own into the Junk tab.
         var junk = true
-        /// Screenshots older than this many days count as junk.
-        var screenshotDays = 30
+        /// What counts as junk.
+        var junkRules = Junk.Rules()
         /// Where the scan and its previews are saved: the usual place, or
         /// the nightly run's own folder so it never overwrites a review in progress.
         var runFile = Paths.lastRun
@@ -141,6 +143,7 @@ struct Scanner {
                                  documents: run.documentGroups.map { $0.reduce(0) { $0 + $1.photos.count } } ?? 0))
         board.end()
         if options.runFile == Paths.lastRun { Recents.record(run) }
+        Places.note(.scanned, source)
         return run
     }
 
@@ -148,8 +151,8 @@ struct Scanner {
     /// Vision checks run only on photos that already look weak, and are
     /// cached; Apple's model settles the ones that aren't clear-cut.
     private func findJunk(_ singles: [Photo], among all: [Photo], _ lookup: [String: Item], useModel: Bool) async throws -> [Run.Group] {
-        let context = Junk.context(all, screenshotDays: options.screenshotDays)
-        let strong = Inspector.rejects(singles, among: all)
+        let context = Junk.context(all, rules: options.junkRules)
+        let strong = Inspector.rejects(singles, among: all, blurShare: options.junkRules.blurShare / 3)
         let look = singles.filter { strong[$0.id] == nil && Junk.worthALook($0, context) }
         let store = try Store()
         board.start(8, total: look.count)
@@ -214,7 +217,7 @@ struct Scanner {
         var rejected: Set<Grouper.Pair> = []
         for (n, edge) in checks.enumerated() {
             if let a = await image(edge.i), let b = await image(edge.j),
-               Verifier.alignedSimilarity(a, b) < Verifier.minimumSimilarity {
+               Verifier.alignedSimilarity(a, b) < options.pixelCheck {
                 rejected.insert(Grouper.Pair(edge.i, edge.j))
             }
             board.advance(3, done: n + 1)
@@ -502,41 +505,5 @@ struct Scanner {
         let kinds = Set(problems.values).sorted().joined(separator: ", ")
         board.finish(5, detail: problems.isEmpty ? "no problems spotted" : "\(problems.count) look like rejects (\(kinds))")
         return problems
-    }
-}
-
-/// Recently scanned sources, for the home screen.
-enum Recents {
-    struct Entry: Codable {
-        var source: Source
-        var date: Date
-        var photos: Int
-        var groups: Int
-    }
-
-    static var file: URL { Paths.root.appendingPathComponent("recent.json") }
-
-    static func all() -> [Entry] {
-        guard let data = try? Data(contentsOf: file) else { return [] }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let entries = (try? decoder.decode([Entry].self, from: data)) ?? []
-        // One entry per place, even for entries saved before folder paths
-        // were spelled one way.
-        var seen = Set<Source>()
-        return entries.compactMap { entry in
-            var entry = entry
-            if case .folder(let path) = entry.source { entry.source = .folder(URL(fileURLWithPath: path)) }
-            return seen.insert(entry.source).inserted ? entry : nil
-        }
-    }
-
-    static func record(_ run: Run) {
-        guard let source = run.source else { return }
-        var entries = all().filter { $0.source != source }
-        entries.insert(Entry(source: source, date: run.date, photos: run.scanned, groups: run.groups.count), at: 0)
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        try? encoder.encode(Array(entries.prefix(12))).write(to: file, options: .atomic)
     }
 }

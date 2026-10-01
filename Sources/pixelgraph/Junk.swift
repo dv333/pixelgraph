@@ -26,11 +26,23 @@ enum Junk {
         var tilt: Float?
     }
 
+    /// What counts as junk, from Settings.
+    struct Rules: Sendable {
+        var screenshotDays = 30
+        /// The blurriest this share of a scan can count as blurry; the
+        /// blurriest third of that counts on its own.
+        var blurShare: Float = 0.15
+        /// Horizons tilted more than this (and up to 35°) are crooked.
+        var minTilt: Float = 6
+        /// The reasons to look for.
+        var reasons = Set(Junk.order)
+    }
+
     struct Context {
-        /// Focus of the blurriest 5% and 15% of this scan, so "blurry" adapts to the library.
+        /// Focus of the blurriest 5% and 15% of this scan (by default), so "blurry" adapts to the library.
         var blurFloor: Float
         var softFloor: Float
-        var screenshotDays: Int
+        var rules: Rules
         var now: Date
     }
 
@@ -45,10 +57,10 @@ enum Junk {
     static let order = ["accidental shot", "blurry", "motion blur", "crooked", "bad exposure", "smudged lens",
                         "old screenshot", "forwarded image", "low quality"]
 
-    static func context(_ all: [Photo], screenshotDays: Int, now: Date = .now) -> Context {
+    static func context(_ all: [Photo], rules: Rules = Rules(), now: Date = .now) -> Context {
         let focus = all.compactMap { $0.quality?.netFocus }.sorted()
-        func percentile(_ p: Float) -> Float { focus.isEmpty ? 0 : focus[Int(Float(focus.count - 1) * p)] }
-        return Context(blurFloor: percentile(0.05), softFloor: percentile(0.15), screenshotDays: screenshotDays, now: now)
+        func percentile(_ p: Float) -> Float { focus.isEmpty ? 0 : focus[Int(Float(focus.count - 1) * min(max(p, 0), 1))] }
+        return Context(blurFloor: percentile(rules.blurShare / 3), softFloor: percentile(rules.blurShare), rules: rules, now: now)
     }
 
     /// Worth the extra Vision checks: photos that already look weak in some way.
@@ -86,10 +98,12 @@ enum Junk {
     /// Why a photo looks like junk, and whether that's sure or needs a second
     /// opinion; nil when it looks fine. `strong` is a sure reason found already.
     static func judge(_ photo: Photo, origin: String, signals: Signals?, strong: String?, _ context: Context) -> (reason: String, sure: Bool)? {
-        if let strong { return (strong, true) }
+        // Reasons switched off in Settings neither decide nor count as signs.
+        let wanted = context.rules.reasons
+        if let strong, wanted.contains(strong) { return (strong, true) }
         if photo.isScreenshot {
             let days = context.now.timeIntervalSince(photo.date) / 86_400
-            return days > Double(context.screenshotDays) ? ("old screenshot", true) : nil
+            return wanted.contains("old screenshot") && days > Double(context.rules.screenshotDays) ? ("old screenshot", true) : nil
         }
         guard !photo.analysis.isUtility else { return nil }
         var signs: [String] = []
@@ -98,11 +112,12 @@ enum Junk {
         if let s = signals {
             // A face means someone meant to take it.
             if photo.analysis.faceCount == 0, s.subject < 0.02 || !Set(s.labels).isDisjoint(with: surfaces) { signs.append("accidental shot") }
-            if let tilt = s.tilt, (6...35).contains(abs(tilt)) { signs.append("crooked") }
+            if let tilt = s.tilt, abs(tilt) >= context.rules.minTilt, abs(tilt) <= 35 { signs.append("crooked") }
         }
         // Small and named by a messaging app: a forward, which counts twice.
         let small = max(photo.width, photo.height) <= 1600 && photo.pixels < 2_000_000
         if small, forwardedNames.contains(where: { origin.contains($0) }) { signs += ["forwarded image", "forwarded image"] }
+        signs = signs.filter(wanted.contains)
         guard signs.count >= 2 else { return nil }
         let reason = ["forwarded image", "accidental shot", "crooked", "motion blur", "blurry"].first(where: signs.contains) ?? "low quality"
         return (reason, false)

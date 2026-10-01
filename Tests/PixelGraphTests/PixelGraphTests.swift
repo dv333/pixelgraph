@@ -462,7 +462,7 @@ private func member(_ id: String, sharpness: Float = 0.01, aesthetic: Float = 0)
 }
 
 @Test func junkNeedsOneStrongSignOrTwoThatAgree() {
-    let context = Junk.context([], screenshotDays: 30, now: t0.addingTimeInterval(86_400 * 40))
+    let context = Junk.context([], now: t0.addingTimeInterval(86_400 * 40))
     let plain = Junk.Signals(labels: ["dog"], subject: 0.3, tilt: nil)
 
     // An old screenshot is junk; a recent one isn't.
@@ -483,4 +483,80 @@ private func member(_ id: String, sharpness: Float = 0.01, aesthetic: Float = 0)
     #expect(Junk.judge(small, origin: "img-20240101-wa0003.jpg", signals: nil, strong: nil, context)?.reason == "forwarded image")
     // Having no face is never a sign by itself.
     #expect(Junk.judge(photo("landscape", 0), origin: "img_2.heic", signals: plain, strong: nil, context) == nil)
+}
+
+@Test func junkReasonsSwitchedOffNeitherDecideNorCount() {
+    var rules = Junk.Rules()
+    rules.reasons.remove("old screenshot")
+    rules.reasons.remove("crooked")
+    let context = Junk.context([], rules: rules, now: t0.addingTimeInterval(86_400 * 40))
+    #expect(Junk.judge(photo("old", 0, at: 0, screenshot: true), origin: "", signals: nil, strong: nil, context) == nil)
+    let dull = photo("dull", 0, aesthetic: -0.5)
+    #expect(Junk.judge(dull, origin: "", signals: Junk.Signals(labels: ["dog"], subject: 0.3, tilt: 14), strong: nil, context) == nil)
+    #expect(Junk.judge(dull, origin: "", signals: nil, strong: "bad exposure", context)?.reason == "bad exposure")
+}
+
+@Test func settingsHaveDefaultsAndStepWithinRange() throws {
+    let settings = Settings(saved: [:])
+    #expect(Settings.Key.allCases.allSatisfy { Settings.specs[$0] != nil })
+    #expect(settings.changed == 0)
+    #expect(settings.rules.momentThreshold == 0.5 && settings.rules.momentWindow == 600 && settings.rules.sceneThreshold == 0.3)
+    #expect(settings.rules.farApartMetres == 2_000)
+    #expect(settings.junkRules.reasons == Set(Junk.order))
+    #expect(settings.judge() == nil)
+
+    let moment = try #require(Settings.specs[.moment])
+    #expect(moment.step("0.50", by: 1) == "0.55")
+    #expect(moment.step("0.80", by: 1) == "0.80")
+    #expect(moment.normalized("2") == "0.80")
+    #expect(moment.normalized("abc") == nil)
+    let time = try #require(Settings.specs[.nightlyTime])
+    #expect(time.step("23:45", by: 1) == "00:15")
+    #expect(time.normalized("7:5") == "07:05")
+    #expect(time.normalized("25:00") == nil)
+
+    // A bad saved value reads as the default; a changed one counts.
+    let changed = Settings(saved: ["similar.moment": "nonsense", "junk.find.crooked": "off", "ai.model": "qwen2.5vl:7b"])
+    #expect(changed[.moment] == "0.50")
+    #expect(!changed.junkRules.reasons.contains("crooked"))
+    #expect(changed.judge()?.model == "qwen2.5vl:7b")
+    #expect(changed.changed == 2)
+}
+
+@Test func sourcesCountForTheirMonths() {
+    let calendar = Calendar.current
+    let march = calendar.date(from: DateComponents(year: 2024, month: 3, day: 1))!
+    let june = calendar.date(from: DateComponents(year: 2024, month: 6, day: 1))!
+    #expect(Source.dates(from: march, to: june).places == ["month:2024-03", "month:2024-04", "month:2024-05"])
+    #expect(Source.months([march, june]).places == ["month:2024-03", "month:2024-06"])
+    #expect(Source.dates(from: march, to: nil).places.isEmpty)
+    #expect(Source.folder(path: "/x/y").places == ["folder:/x/y"])
+}
+
+@Test func databaseKeepsSettingsPinsAndProgress() throws {
+    setenv("PIXELGRAPH_HOME", FileManager.default.temporaryDirectory.appendingPathComponent("pixelgraph-test-home").path, 0)
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent("pixelgraph-db-\(UUID().uuidString).db")
+    defer { try? FileManager.default.removeItem(at: url) }
+    let db = try Database(url: url)
+    db.setSetting("similar.moment", "0.45")
+    #expect(db.settings()["similar.moment"] == "0.45")
+    db.setSetting("similar.moment", nil)
+    #expect(db.settings().isEmpty)
+
+    db.setPinned("/a", true)
+    db.setPinned("/b", true)
+    db.setPinned("/a", false)
+    #expect(db.pins() == ["/b"])
+
+    db.note(.scanned, places: ["folder:/b"], date: t0)
+    db.note(.moved, places: ["folder:/b"], moved: 3, date: t0.addingTimeInterval(60))
+    db.note(.moved, places: ["folder:/b"], moved: 2, date: t0.addingTimeInterval(120))
+    let status = try #require(db.statuses()["folder:/b"])
+    #expect(status.step == .moved && status.moved == 5 && status.date == t0.addingTimeInterval(120))
+
+    db.setState("last-folder", "/b")
+    #expect(db.state("last-folder") == "/b")
+    db.addRecent(Recents.Entry(source: .folder(path: "/b"), date: t0, photos: 10, groups: 2))
+    db.addRecent(Recents.Entry(source: .folder(path: "/b"), date: t0.addingTimeInterval(1), photos: 12, groups: 3))
+    #expect(db.recents().count == 1 && db.recents().first?.photos == 12)
 }

@@ -8,36 +8,45 @@ struct Auto: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Nightly clean-up: move clear duplicates to PGDuplicates and leave the close calls.")
 
-    @Option(help: "Look at photos taken in the last this many days.")
-    var days = 30
+    // Each defaults to its value in Settings.
+    @Option(help: "Look at photos taken in the last this many days (Settings: 30).")
+    var days: Int?
 
-    @Option(help: "Move at most this many photos in one run.")
-    var limit = 300
+    @Option(help: "Move at most this many photos in one run (Settings: 300).")
+    var limit: Int?
 
     @Flag(help: "Show what would move without moving anything.")
     var dryRun = false
 
-    @Option(help: "Then let an assistant settle the close calls: claude, codex or opencode.")
+    @Option(help: "Then let an assistant settle the close calls: claude, codex, opencode or none (Settings: none).")
     var assistant: String?
 
-    @Option(help: "Ask a local vision model through Ollama about the close calls and junk, e.g. qwen2.5vl:32b.")
+    @Option(help: "Ask a local vision model through Ollama about the close calls and junk, e.g. qwen2.5vl:32b, or off (Settings: off).")
     var judgeModel: String?
 
-    @Option(help: "How sure the local model must be (0–1) before its agreement moves anything.")
-    var judgeConfidence = 0.85
+    @Option(help: "How sure the local model must be (0–1) before its agreement moves anything (Settings: 0.85).")
+    var judgeConfidence: Double?
 
     @Option(help: "Scan this folder instead of the Photos library.")
     var folder: String?
 
     func validate() throws {
-        if let assistant, !Self.assistants.contains(assistant) { throw ValidationError("--assistant is claude, codex or opencode.") }
-        guard (0...1).contains(judgeConfidence) else { throw ValidationError("--judge-confidence is between 0 and 1.") }
+        if let assistant, !Self.assistants.contains(assistant), assistant != "none" {
+            throw ValidationError("--assistant is claude, codex, opencode or none.")
+        }
+        if let judgeConfidence, !(0...1).contains(judgeConfidence) { throw ValidationError("--judge-confidence is between 0 and 1.") }
     }
 
     static let assistants = ["claude", "codex", "opencode"]
 
     func run() async throws {
         let started = Date.now
+        let settings = Settings.load()
+        let days = self.days ?? settings.int(.nightlyDays)
+        let limit = self.limit ?? settings.int(.nightlyLimit)
+        let assistant = (self.assistant ?? settings.optional(.assistant)).flatMap { Self.assistants.contains($0) ? $0 : nil }
+        let judge = judgeModel == "off" ? nil : settings.judge(model: judgeModel)
+        let judgeConfidence = self.judgeConfidence ?? settings.number(.judgeConfidence)
         let source: Source
         if let folder {
             source = .folder(URL(fileURLWithPath: (folder as NSString).expandingTildeInPath))
@@ -48,8 +57,8 @@ struct Auto: AsyncParsableCommand {
         let run = try await Agent.scan(source, into: .nightly, quiet: isatty(STDOUT_FILENO) == 0)
         let moved = try await Agent.move(.nightly, groups: nil, to: .duplicates, dryRun: dryRun, clearOnly: true, limit: limit)
         var judged: Agent.Judged?
-        if let judgeModel {
-            judged = try await Agent.judgeAndMove(.nightly, judge: Judge(model: judgeModel), threshold: judgeConfidence,
+        if let judge {
+            judged = try await Agent.judgeAndMove(.nightly, judge: judge, threshold: judgeConfidence,
                                                   limit: max(0, limit - moved.photos), dryRun: dryRun)
         }
         let after = (try? Run.load(from: Agent.Workspace.nightly.runFile)) ?? run
@@ -78,19 +87,19 @@ struct Auto: AsyncParsableCommand {
         }
         Agent.writeNightlyLog(entry)
         notify(summary)
-        remindToEmpty()
+        remindToEmpty(after: settings.int(.emptyDays))
     }
 
-    /// Once a month, when photos have sat in PGDuplicates or PGJunk for 30
-    /// days, a notification suggests `pixelgraph empty`. Nothing is deleted
-    /// until you say so there.
-    private func remindToEmpty() {
+    /// Once a month, when photos have sat in PGDuplicates or PGJunk for a
+    /// while (30 days unless Settings say otherwise), a notification suggests
+    /// `pixelgraph empty`. Nothing is deleted until you say so there.
+    private func remindToEmpty(after days: Int) {
         let marker = Paths.nightly.appendingPathComponent("last-reminder")
         let last = (try? String(contentsOf: marker, encoding: .utf8)).flatMap { try? Date($0, strategy: .iso8601) } ?? .distantPast
         guard Date.now.timeIntervalSince(last) >= 30 * 86_400 else { return }
-        let waiting = Staged.older(than: 30).count
+        let waiting = Staged.older(than: days).count
         guard waiting > 0 else { return }
-        notify("\(waiting) photos have waited 30 days in PGDuplicates or PGJunk. Run pixelgraph empty to clear them out.")
+        notify("\(waiting) photos have waited \(days) days in PGDuplicates or PGJunk. Run pixelgraph empty to clear them out.")
         try? Date.now.formatted(.iso8601).write(to: marker, atomically: true, encoding: .utf8)
     }
 
@@ -155,14 +164,17 @@ struct Auto: AsyncParsableCommand {
 }
 
 /// `pixelgraph schedule`: runs `pixelgraph auto` every night through launchd.
+/// The same as "Run every night" in Settings.
 struct Schedule: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Run the nightly clean-up automatically, or stop it.")
 
-    @Option(help: "Time of day, 24-hour.")
-    var at = "02:00"
+    @Option(help: "Time of day, 24-hour (Settings: 02:00).")
+    var at: String?
 
+    // Given here, these are fixed for the nightly job; left out, each night
+    // uses what Settings say then.
     @Option(help: "Look at photos taken in the last this many days.")
-    var days = 30
+    var days: Int?
 
     @Option(help: "Let an assistant settle the close calls: claude, codex or opencode.")
     var assistant: String?
@@ -176,73 +188,33 @@ struct Schedule: ParsableCommand {
     @Flag(help: "Stop running nightly.")
     var off = false
 
-    static let label = "dev.pixelgraph.nightly"
-
     func validate() throws {
         if let assistant, !Auto.assistants.contains(assistant) { throw ValidationError("--assistant is claude, codex or opencode.") }
-        guard parse(at) != nil else { throw ValidationError("Give the time as HH:MM, e.g. 02:00.") }
-    }
-
-    private func parse(_ time: String) -> (hour: Int, minute: Int)? {
-        let parts = time.split(separator: ":").compactMap { Int($0) }
-        guard parts.count == 2, (0..<24).contains(parts[0]), (0..<60).contains(parts[1]) else { return nil }
-        return (parts[0], parts[1])
+        if let at, Nightly.parse(at) == nil { throw ValidationError("Give the time as HH:MM, e.g. 02:00.") }
     }
 
     func run() throws {
-        let plist = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/LaunchAgents/\(Self.label).plist")
-        let domain = "gui/\(getuid())"
-        launchctl(["bootout", "\(domain)/\(Self.label)"])
         if off {
-            try? FileManager.default.removeItem(at: plist)
+            Nightly.remove()
             print("The nightly clean-up is off.")
             return
         }
-        guard let time = parse(at), let me = Bundle.main.executableURL?.path else { return }
-        try FileManager.default.createDirectory(at: Paths.nightly, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: plist.deletingLastPathComponent(), withIntermediateDirectories: true)
-        var arguments = [me, "auto", "--days", String(days)]
+        let settings = Settings.load()
+        let time = at ?? settings[.nightlyTime]
+        var arguments: [String] = []
+        if let days { arguments += ["--days", String(days)] }
         if let assistant { arguments += ["--assistant", assistant] }
         if let judgeModel { arguments += ["--judge-model", judgeModel] }
-        let log = Paths.nightly.appendingPathComponent("auto.log").path
-        let job: [String: Any] = [
-            "Label": Self.label,
-            "ProgramArguments": arguments,
-            "StartCalendarInterval": ["Hour": time.hour, "Minute": time.minute],
-            "StandardOutPath": log,
-            "StandardErrorPath": log,
-            "ProcessType": "Background",
-        ]
-        let data = try PropertyListSerialization.data(fromPropertyList: job, format: .xml, options: 0)
-        try data.write(to: plist, options: .atomic)
-        guard launchctl(["bootstrap", domain, plist.path]) == 0 else {
-            throw ValidationError("launchctl couldn't load \(plist.path).")
-        }
-        if now { launchctl(["kickstart", "-k", "\(domain)/\(Self.label)"]) }
+        try Nightly.install(at: time, arguments: arguments, now: now)
+        let shownDays = days ?? settings.int(.nightlyDays)
+        let shownAssistant = assistant ?? settings.optional(.assistant)
         print("""
-            PixelGraph will tidy up every night at \(String(format: "%02d:%02d", time.hour, time.minute)): \
-            clear duplicates from the last \(days) days go to PGDuplicates; nothing is deleted.
-            Close calls wait in the nightly scan\(assistant.map { " for \($0)" } ?? ""). Log: \(log)
+            PixelGraph will tidy up every night at \(time): \
+            clear duplicates from the last \(shownDays) days go to PGDuplicates; nothing is deleted.
+            Close calls wait in the nightly scan\(shownAssistant.map { " for \($0)" } ?? ""). Log: \(Nightly.log.path)
             The first run needs Photos access for pixelgraph itself: run with --now while you're at the Mac and allow it.
-            Stop with `pixelgraph schedule --off`.
+            Change it in `pixelgraph settings`; stop with `pixelgraph schedule --off`.
             """)
-    }
-
-    @discardableResult
-    private func launchctl(_ arguments: [String]) -> Int32 {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        process.arguments = arguments
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus
-        } catch {
-            return -1
-        }
     }
 }
 
@@ -253,13 +225,14 @@ struct Schedule: ParsableCommand {
 struct Empty: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Clear out PGDuplicates and PGJunk after they've waited a while (asks first).")
 
-    @Option(help: "Only what has waited at least this many days.")
-    var olderThan = 30
+    @Option(help: "Only what has waited at least this many days (Settings: 30).")
+    var olderThan: Int?
 
     @Flag(help: "Don't ask; for scripts.")
     var yes = false
 
     func run() async throws {
+        let olderThan = self.olderThan ?? Settings.load().int(.emptyDays)
         let entries = Staged.older(than: olderThan)
         var photos: [String] = [], files: [URL] = [], gone: [String] = []
         let library = entries.filter { !$0.id.hasPrefix("file:") }

@@ -14,45 +14,54 @@ struct PixelGraph: AsyncParsableCommand {
             """,
         version: "0.2.0",
         subcommands: [Home.self, Scan.self, Review.self, ReportCommand.self, Undo.self, Albums.self, Eval.self,
-                      MCPCommand.self, Auto.self, Schedule.self, Empty.self, DebugImages.self],
+                      MCPCommand.self, Auto.self, Schedule.self, Empty.self, SettingsCommand.self, DebugImages.self],
         defaultSubcommand: Home.self
     )
 }
 
-/// Shared tuning flags.
+/// Shared tuning flags. Each defaults to its value in Settings
+/// (`pixelgraph settings`); a flag given here wins for this run only.
 struct ScanOptions: ParsableArguments {
-    @Option(help: "Max fingerprint distance for shots taken close together.")
-    var momentThreshold: Float = 0.5
+    @Option(help: "Max fingerprint distance for shots taken close together (Settings: 0.5).")
+    var momentThreshold: Float?
 
-    @Option(help: "Seconds over which the moment threshold eases to the scene threshold.")
-    var momentWindow: Double = 600
+    @Option(help: "Seconds over which the moment threshold eases to the scene threshold (Settings: 600).")
+    var momentWindow: Double?
 
-    @Option(help: "Max fingerprint distance for shots any time apart (copies, same scene).")
-    var sceneThreshold: Float = 0.3
+    @Option(help: "Max fingerprint distance for shots any time apart: copies, same scene (Settings: 0.3).")
+    var sceneThreshold: Float?
 
-    @Flag(help: "Don't use Apple's on-device model (close calls, eyes and faces).")
-    var noModel = false
+    @Flag(inversion: .prefixedNo, help: "Use Apple's on-device model for close calls, eyes and faces.")
+    var model: Bool?
 
-    @Flag(help: "Never download from iCloud; judge photos from the previews on this Mac.")
-    var offline = false
+    @Flag(inversion: .prefixedNo, help: "Never download from iCloud; judge photos from the previews on this Mac.")
+    var offline: Bool?
 
-    @Flag(help: "Leave documents (receipts, forms, screenshots) among the other photos instead of sorting them for PGDocuments.")
-    var noDocuments = false
+    @Flag(inversion: .prefixedNo, help: "Sort documents (receipts, forms, screenshots) for PGDocuments.")
+    var documents: Bool?
 
-    @Flag(help: "Don't tag scenes (beach, dog…) in the photos in groups.")
-    var noDescribe = false
+    @Flag(inversion: .prefixedNo, help: "Tag scenes (beach, dog…) in the photos in groups.")
+    var describe: Bool?
 
-    @Flag(help: "Don't look for junk with no lookalike: accidental, blurry or crooked shots, old screenshots, forwards (the Junk tab).")
-    var noJunk = false
+    @Flag(inversion: .prefixedNo, help: "Look for junk with no lookalike: accidental, blurry or crooked shots, old screenshots, forwards.")
+    var junk: Bool?
 
-    @Option(help: "Screenshots older than this many days count as junk.")
-    var screenshotDays = 30
+    @Option(help: "Screenshots older than this many days count as junk (Settings: 30).")
+    var screenshotDays: Int?
 
-    var scanner: Scanner.Options {
-        Scanner.Options(
-            rules: GroupingRules(momentThreshold: momentThreshold, momentWindow: momentWindow, sceneThreshold: sceneThreshold),
-            useModel: !noModel, offline: offline, documents: !noDocuments, describe: !noDescribe, junk: !noJunk,
-            screenshotDays: screenshotDays)
+    /// Settings, with the flags given here on top.
+    func scanner(_ settings: Settings = .load()) -> Scanner.Options {
+        var options = settings.scanner
+        if let momentThreshold { options.rules.momentThreshold = momentThreshold }
+        if let momentWindow { options.rules.momentWindow = momentWindow }
+        if let sceneThreshold { options.rules.sceneThreshold = sceneThreshold }
+        if let model { options.useModel = model }
+        if let offline { options.offline = offline }
+        if let documents { options.documents = documents }
+        if let describe { options.describe = describe }
+        if let junk { options.junk = junk }
+        if let screenshotDays { options.junkRules.screenshotDays = screenshotDays }
+        return options
     }
 }
 
@@ -64,14 +73,14 @@ struct Home: AsyncParsableCommand {
 
     @OptionGroup var options: ScanOptions
 
-    @Flag(help: "Skip the opening title (also PIXELGRAPH_NO_INTRO=1).")
+    @Flag(help: "Skip the opening title (also PIXELGRAPH_NO_INTRO=1, or turn it off in Settings).")
     var noIntro = false
 
     func run() async throws {
         guard isatty(STDIN_FILENO) != 0, isatty(STDOUT_FILENO) != 0 else {
             throw ValidationError("Run pixelgraph in a terminal, or use `pixelgraph scan --album/--folder`.")
         }
-        try await App(options: options.scanner, intro: !noIntro).run()
+        try await App(flags: options, intro: !noIntro && Settings.load().bool(.intro)).run()
     }
 }
 
@@ -120,7 +129,7 @@ struct Scan: AsyncParsableCommand {
             }
         }
 
-        let scanner = Scanner(source: source, options: options.scanner)
+        let scanner = Scanner(source: source, options: options.scanner())
         let stop = StopHandler { scanner.board.abandon() }
         let run = try await scanner.run()
         stop.cancel()
@@ -138,8 +147,8 @@ struct Scan: AsyncParsableCommand {
 struct Review: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Review the last scan: keep the best, move the rest.")
 
-    @Option(help: "auto, iterm (sharp photos in iTerm2) or blocks (coloured blocks, any true-colour terminal).")
-    var graphics: TerminalImage.Mode = .auto
+    @Option(help: "auto, iterm (sharp photos in iTerm2) or blocks (coloured blocks, any true-colour terminal). Default: Settings.")
+    var graphics: TerminalImage.Mode?
 
     @Option(help: .hidden)
     var folder: String?
@@ -163,7 +172,7 @@ struct Review: AsyncParsableCommand {
             return
         }
         if run.source?.isPhotos ?? true, folder == nil { try await Library.requestAccess() }
-        try await ReviewSession(run: run, runFile: runFile, folder: reportFolder, graphics: graphics).show()
+        try await ReviewSession(run: run, runFile: runFile, folder: reportFolder, graphics: graphics ?? Settings.load().graphics).show()
     }
 }
 

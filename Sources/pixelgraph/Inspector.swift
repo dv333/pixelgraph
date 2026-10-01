@@ -102,9 +102,9 @@ enum Inspector {
     /// nearly black, blown out, shot through a smudged lens, or among the
     /// blurriest in this scan and poorly rated by Vision. `all` is every
     /// photo scanned, so "blurry" adapts to the library.
-    static func rejects(_ photos: [Photo], among all: [Photo]) -> [String: String] {
+    static func rejects(_ photos: [Photo], among all: [Photo], blurShare: Float = 0.05) -> [String: String] {
         let focus = all.compactMap { $0.quality?.netFocus }.sorted()
-        let blurFloor = focus.isEmpty ? 0 : focus[Int(Float(focus.count - 1) * 0.05)]
+        let blurFloor = focus.isEmpty ? 0 : focus[Int(Float(focus.count - 1) * min(max(blurShare, 0), 1))]
         var found: [String: String] = [:]
         for photo in photos where !photo.isScreenshot && !photo.analysis.isUtility {
             guard let q = photo.quality else { continue }

@@ -29,7 +29,9 @@ pixelgraph
 
 In iTerm2, Ghostty, kitty and WezTerm, PixelGraph opens with a short title: a field of out-of-focus lights racks into focus and becomes the name. Any key skips it; `--no-intro` or `PIXELGRAPH_NO_INTRO=1` turns it off.
 
-Choose where your photos are — an album, a month of your library, a folder, a drive or iCloud Drive — and PixelGraph scans it, then opens the review. On the months screen, Space ticks a month (or a whole year), X ticks every month from the last one you ticked, and Enter scans just the ticked months, even ones far apart.
+Choose where your photos are — an album, a month of your library, a folder, a drive or iCloud Drive — and PixelGraph scans it, then opens the review. On the months screen, Space ticks a month (or a whole year), X ticks every month from the last one you ticked, C clears the ticks, and Enter scans just the ticked months, even ones far apart. Ticks are kept for next time.
+
+Every folder, album and month shows how far it got, with the latest step and its date: `✓ scanned · 3 Sep`, `✓ opened`, `✓ reviewed` (every group looked at) or `✓ moved 34`. Choosing one that's been done before says so, and Enter scans it again. P pins the highlighted folder to the top of the home screen (P again unpins), and "Back to …" reopens the folder you were last in. Press `,` for Settings.
 
 ```
 pixelgraph scan --album "Japan 2025"         # an Apple Photos album
@@ -127,7 +129,7 @@ Then ask, for example, "scan my photos from last month and show me the close cal
 
 ### Nightly clean-up
 
-`pixelgraph schedule --at 02:00 --now` runs `pixelgraph auto` every night through launchd. It scans the last 30 days into its own workspace (never your review in progress), moves only the clear cases to PGDuplicates (extra copies of the same picture, and burst shots well behind the best or flagged, when the best is clean), never deletes, caps a night at 300 photos, and sends a notification. Close calls wait for you (`pixelgraph review --nightly`) or for an assistant: add `--assistant claude` or `--assistant codex` to let Claude Code or Codex settle them with deleting switched off. `--now` runs it once straight away so macOS can ask for Photos access while you're there. `pixelgraph schedule --off` stops it; `pixelgraph undo` puts back the last move.
+`pixelgraph schedule --at 02:00 --now` (or "Run every night" in Settings) runs `pixelgraph auto` every night through launchd. It scans the last 30 days into its own workspace (never your review in progress), moves only the clear cases to PGDuplicates (extra copies of the same picture, and burst shots well behind the best or flagged, when the best is clean), never deletes, caps a night at 300 photos, and sends a notification. Close calls wait for you (`pixelgraph review --nightly`) or for an assistant: add `--assistant claude` or `--assistant codex` to let Claude Code or Codex settle them with deleting switched off. `--now` runs it once straight away so macOS can ask for Photos access while you're there. `pixelgraph schedule --off` stops it; `pixelgraph undo` puts back the last move.
 
 ### Fully automatic, with a local model
 
@@ -139,11 +141,67 @@ A vision model running on your Mac through [Ollama](https://ollama.com) can sett
 
 The model moves photos only when it picks the same shot as PixelGraph with at least 85% confidence (`--judge-confidence`); anything it says is a different moment worth keeping stays. Junk moves to PGJunk only when the model also calls it junk that surely. Everything else still waits for you. Nothing is deleted: once a month, when photos have waited 30 days in PGDuplicates or PGJunk, a notification suggests `pixelgraph empty`, which asks before sending them to Recently Deleted or the Trash.
 
-**OpenCode.** To drive PixelGraph from [OpenCode](https://opencode.ai) with any model, local ones included, add to `~/.config/opencode/opencode.json`:
-```json
-{ "mcp": { "pixelgraph": { "type": "local", "command": ["/usr/local/bin/pixelgraph", "mcp"], "enabled": true } } }
+### OpenCode, step by step
+
+[OpenCode](https://opencode.ai) is an open-source assistant for the terminal that works with any model, including ones running on your Mac. Hooked to PixelGraph, you can ask it to tidy your photos in plain words, and the nightly run can hand it the close calls.
+
+**1. Install PixelGraph where OpenCode can find it.**
+```bash
+cd pixelgraph && git pull && swift build -c release
+sudo cp .build/release/pixelgraph /usr/local/bin/
+pixelgraph --version
 ```
-For the nightly run, `--assistant opencode` hands the remaining close calls to `opencode run`, with PixelGraph's tools added and deleting switched off; it uses the model your OpenCode config names.
+
+**2. Install OpenCode.**
+```bash
+curl -fsSL https://opencode.ai/install | bash   # or: npm i -g opencode-ai
+opencode --version
+```
+
+**3. Pick a model.** It has to call tools, and to judge photos it has to see them.
+- Fully local (nothing leaves the Mac): install [Ollama](https://ollama.com) (`brew install ollama`), then
+  ```bash
+  ollama pull qwen3-vl:32b     # 48 GB+ of memory; on 16–32 GB use qwen3-vl:8b
+  OLLAMA_CONTEXT_LENGTH=32768 ollama serve
+  ```
+  The longer context matters: OpenCode's instructions and PixelGraph's tool list don't fit in Ollama's small default. To keep it running in the background instead, `brew services start ollama` after `launchctl setenv OLLAMA_CONTEXT_LENGTH 32768`.
+- Or a cloud model: run `opencode auth login` and choose a provider. The thumbnails it looks at go to that provider.
+
+**4. Tell OpenCode about PixelGraph (and Ollama).** Create `~/.config/opencode/opencode.json`:
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (this Mac)",
+      "options": { "baseURL": "http://localhost:11434/v1" },
+      "models": { "qwen3-vl:32b": { "name": "Qwen3-VL 32B" } }
+    }
+  },
+  "model": "ollama/qwen3-vl:32b",
+  "mcp": {
+    "pixelgraph": { "type": "local", "command": ["/usr/local/bin/pixelgraph", "mcp", "--no-trash"], "enabled": true }
+  }
+}
+```
+Using a cloud model? Leave out `provider` and `model`. `--no-trash` means the assistant can move photos to PGDuplicates but never delete; drop it if you want it able to delete when you ask.
+
+**5. Allow Photos.** Photos access belongs to the app that starts PixelGraph. Run `opencode` once from Terminal (or iTerm) and ask it to scan an album; when macOS asks whether Terminal may access Photos, allow it. Folders need no permission.
+
+**6. Use it.** Start `opencode` in any folder and ask, for example:
+- "Use pixelgraph to scan my photos from last month and tell me what it found."
+- "Show me the close calls one group at a time and pick the best."
+- "Do a dry run of moving the duplicates, then move them."
+- "Undo that."
+
+To check it's connected, ask "which pixelgraph tools do you have?": it should list scan, list_groups, show_photos, move and the rest.
+
+**7. Let it work every night.** In `pixelgraph settings`, under Nightly clean-up, switch on "Run every night" and set "Then ask" to `opencode` (or run `pixelgraph schedule --assistant opencode --now`). Each night PixelGraph moves the clear duplicates itself, then runs `opencode run` with its tools added and deleting switched off to settle the close calls, using the model in your OpenCode config. To have the local model double-check too, set "Vision model" under Local AI (e.g. `qwen3-vl:32b`), after trying it with `pixelgraph eval --judge-model qwen3-vl:32b`.
+
+**8. Check what happened.** `~/Library/Application Support/PixelGraph/nightly/auto.log` has each night's output, a notification sums it up, `pixelgraph review --nightly` shows what's left and `pixelgraph undo` puts back the last move. Nothing is deleted until you run `pixelgraph empty`, which asks first.
+
+**If something's off:** "can't reach Ollama": start `ollama serve`. The model doesn't use the tools: give it the longer context (step 3) or use a bigger model. "No access to Photos": step 5, or System Settings → Privacy & Security → Photos.
 
 ### iCloud
 
@@ -153,11 +211,40 @@ With **Optimize Mac Storage** on, most originals live in iCloud. PixelGraph grou
 
 Scan in parts — an album, a month, a folder. Results are cached, so rescans are quick and a stopped scan picks up where it left off.
 
-### Tuning
+### Settings
 
-`--moment-threshold` (default 0.5) and `--moment-window` (600 s) control how alike shots taken close together must be; `--scene-threshold` (0.3) does the same for shots any time apart. Lower is stricter.
+Press `,` on the home screen (or run `pixelgraph settings`) to change how PixelGraph works. ↑↓ choose, ←→ change, Enter types a value, `d` puts one back to its default, `D` (shift-d) resets everything. A blue ● marks what you've changed. `pixelgraph settings --list` prints them all.
 
-Data lives in `~/Library/Application Support/PixelGraph/`.
+| Section | Setting | Default |
+|---|---|---|
+| Lookalikes | Shots taken together (how different they may look) | 0.50 |
+| | Easing over | 10 min |
+| | Shots any time apart | 0.30 |
+| | Different places (never lookalikes beyond) | 2 km |
+| | Pixel check (close calls must line up this well) | 0.50 |
+| Picking the best | Apple Intelligence | On |
+| | Stay offline (never download from iCloud) | Off |
+| Sorting | Sort documents · Tag scenes | On · On |
+| Junk | Look for junk | On |
+| | Blurry means the blurriest | 15% |
+| | Crooked from | 6° |
+| | Old screenshots after | 30 days |
+| | Find accidental · blurry · crooked · bad exposure · smudged · old screenshots · forwarded · low quality | all On |
+| Moving | Enter in the move sheet | PGDuplicates (or Delete) |
+| | Describe kept photos | On |
+| Display | Photos | auto (iterm, blocks) |
+| | Opening title | On |
+| Nightly clean-up | Run every night · At | Off · 02:00 |
+| | Photos from the last · Move at most | 30 days · 300 |
+| | Then ask (assistant) | none (claude, codex, opencode) |
+| | Remind to empty after | 30 days |
+| Local AI (Ollama) | Vision model | off |
+| | Must be this sure | 0.85 |
+| | Ollama at | http://localhost:11434 |
+
+A flag on the command line wins for that one run, e.g. `pixelgraph scan --folder ~/Pictures/Trip --moment-threshold 0.4 --no-junk`.
+
+Data lives in `~/Library/Application Support/PixelGraph/`: `pixelgraph.db` (SQLite) keeps your settings, recent scans, pinned folders, ticked months, where you were and each place's progress; `index.sqlite` is only a cache of photo measurements and can be deleted.
 
 ## License
 

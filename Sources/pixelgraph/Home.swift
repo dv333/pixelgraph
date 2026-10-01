@@ -3,11 +3,17 @@ import Foundation
 /// `pixelgraph` on its own: choose where your photos are, scan, review, and
 /// come back here for the next one.
 final class App {
+    /// Flags given on the command line, which win over Settings for this run.
+    private let flags: ScanOptions
+    private var settings: Settings
+    /// This scan's options: Settings, the flags, then the ticks in "What should PixelGraph do?".
     private var options: Scanner.Options
     /// The source waiting for "What should PixelGraph do?".
     private var choosing: Source?
+    /// What's already been done with it, when it's been scanned before.
+    private var already: String?
     private var taskCursor = 0
-    private let ui = UI()
+    private let ui: UI
 
     private enum Row {
         case heading(String)
@@ -22,6 +28,7 @@ final class App {
         case choose
         case scanHere(URL, count: Int)
         case folder(URL)
+        case settings(changed: Int)
     }
 
     private enum Screen: Equatable {
@@ -37,20 +44,26 @@ final class App {
     private var message: String?
     private var photosAllowed = false
     private let intro: Bool
-    /// Months ticked on the months screen (their first moments), the last
-    /// one ticked (where x ranges from), and each month's photo count.
+    /// Months ticked on the months screen (their first moments; kept for
+    /// next time), the last one ticked (where x ranges from), and each
+    /// month's photo count.
     private var ticked: Set<Date> = []
     private var anchor: Date?
     private var monthCounts: [Date: Int] = [:]
     /// q was pressed: "Quit PixelGraph?" is showing.
     private var confirmingQuit = false
-    /// Esc was pressed once with months ticked; a second Esc drops them.
-    private var discardArmed = false
     /// The unfinished review a new scan would replace, shown as a warning.
     private var replacing: Run?
+    /// How far each folder, album and month has got; pinned folder paths.
+    private var statuses: [String: PlaceStatus] = [:]
+    private var pins: [String] = []
 
-    init(options: Scanner.Options, intro: Bool = true) {
-        self.options = options
+    init(flags: ScanOptions, intro: Bool = true) {
+        let settings = Settings.load()
+        self.flags = flags
+        self.settings = settings
+        options = flags.scanner(settings)
+        ui = UI(graphics: settings.graphics)
         self.intro = intro
     }
 
@@ -104,28 +117,57 @@ final class App {
                     choose(source)
                 case .resume:
                     if try await resume() == .quit { return }
+                case .settings:
+                    openSettings()
                 }
             }
             draw()
         }
     }
 
-    private enum Action { case quit, scan(Source), resume }
+    private enum Action { case quit, scan(Source), resume, settings }
 
-    /// Opens "What should PixelGraph do?", noting any review it would replace.
+    /// Opens "What should PixelGraph do?", starting from Settings, noting any
+    /// review it would replace and anything already done with this source.
     private func choose(_ source: Source) {
+        settings = Settings.load()
+        options = flags.scanner(settings)
         choosing = source
         taskCursor = 0
         replacing = (try? Run.load()).flatMap { $0.reviewedGroups > 0 && $0.waiting > 0 ? $0 : nil }
+        already = nil
+        let places = source.places
+        let done = places.compactMap { statuses[$0] }
+        if let latest = done.max(by: { $0.date < $1.date }) {
+            already = places.count > 1
+                ? "\(done.count) of \(places.count) months already done (latest: \(latest.text))."
+                : "Already done here: \(latest.text)."
+        }
+    }
+
+    /// The Settings screen, then back here with the new settings in use.
+    private func openSettings() {
+        let before = settings.graphics
+        settings = SettingsScreen(ui: ui).show()
+        if settings.graphics != before {
+            ui.sharp = settings.graphics.sharp
+            ui.forgetImages()
+        }
+        options = flags.scanner(settings)
+        drawnFrame = nil
+        reload()
     }
 
     // MARK: - Rows
 
     private func load() {
         rows = []
-        if screen != .months { ticked = []; anchor = nil }
+        if screen != .months { anchor = nil }
+        let db = Database.open()
+        statuses = db?.statuses() ?? [:]
+        pins = db?.pins() ?? []
         switch screen {
-        case .home: loadHome()
+        case .home: loadHome(db)
         case .months: loadMonths()
         case .browser(let url): loadFolder(url)
         }
@@ -133,7 +175,14 @@ final class App {
         scroll = 0
     }
 
-    private func loadHome() {
+    /// Loads again, keeping the highlight where it was.
+    private func reload() {
+        let (keep, keepScroll) = (selected, scroll)
+        load()
+        if rows.indices.contains(keep), isSelectable(rows[keep]) { (selected, scroll) = (keep, keepScroll) }
+    }
+
+    private func loadHome(_ db: Database?) {
         if let last = try? Run.load(), last.source != nil, last.waiting > 0 {
             rows.append(.heading("PICK UP WHERE YOU LEFT OFF"))
             rows.append(.resume(scope: last.scope, detail: "\(last.waiting) waiting · \(last.reviewedGroups) of \(last.allGroups.count) groups looked at"))
@@ -155,10 +204,24 @@ final class App {
             rows.append(.heading("  No access to Photos · allow it in System Settings → Privacy & Security → Photos"))
         }
 
+        let fm = FileManager.default
+        let pinned = pins.filter { fm.fileExists(atPath: $0) }.map { URL(fileURLWithPath: $0) }
+        if !pinned.isEmpty {
+            rows.append(.heading(""))
+            rows.append(.heading("PINNED"))
+            for url in pinned {
+                rows.append(.browse(url, title: url.lastPathComponent, detail: Self.shortPath(url.deletingLastPathComponent())))
+            }
+        }
+
         rows.append(.heading(""))
         rows.append(.heading("FOLDERS AND DRIVES"))
+        if let path = db?.state("last-folder"), fm.fileExists(atPath: path), !pins.contains(path) {
+            let url = URL(fileURLWithPath: path)
+            rows.append(.browse(url, title: "Back to “\(url.lastPathComponent)”", detail: "where you left off"))
+        }
         for entry in recents.filter({ !$0.source.isPhotos }).prefix(4) {
-            rows.append(.source(entry.source, detail: "\(entry.source.kind.lowercased()) · last scan: \(entry.groups) group\(entry.groups == 1 ? "" : "s")"))
+            rows.append(.source(entry.source, detail: "\(entry.source.kind.lowercased()) · \(entry.groups) group\(entry.groups == 1 ? "" : "s")"))
         }
         for volume in externalVolumes() {
             rows.append(.browse(volume, title: volume.lastPathComponent, detail: "external drive"))
@@ -170,6 +233,14 @@ final class App {
         let pictures = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures")
         rows.append(.browse(pictures, title: "Pictures", detail: "browse folders"))
         rows.append(.choose)
+        rows.append(.heading(""))
+        rows.append(.settings(changed: settings.changed))
+    }
+
+    /// A folder's path with ~ for home.
+    static func shortPath(_ url: URL) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return url.path.hasPrefix(home) ? "~" + String(url.path.dropFirst(home.count)) : url.path
     }
 
     private func loadMonths() {
@@ -185,6 +256,14 @@ final class App {
                 rows.append(.month(.dates(from: month.start, to: month.end), count: month.count))
             }
         }
+        // Months ticked last time, as long as they're still there.
+        let saved = Database.open()?.state("ticked-months")?.split(separator: ",").compactMap { Double($0) } ?? []
+        ticked = Set(saved.map { Date(timeIntervalSince1970: $0) }).filter { monthCounts[$0] != nil }
+    }
+
+    private func saveTicks() {
+        let value = ticked.sorted().map { String($0.timeIntervalSince1970) }.joined(separator: ",")
+        Database.open()?.setState("ticked-months", value.isEmpty ? nil : value)
     }
 
     /// The first moment of a month row's month.
@@ -248,25 +327,54 @@ final class App {
             }
         case .char("s"):
             if case .browser(let url) = screen { return .scan(.folder(url)) }
+        case .char(","): return .settings
+        case .char("p"): togglePin()
         default: break
         }
         return nil
+    }
+
+    /// The folder a row stands for, if any.
+    private func folderURL(_ row: Row) -> URL? {
+        switch row {
+        case .source(.folder(let path), _): return URL(fileURLWithPath: path)
+        case .browse(let url, _, _), .folder(let url), .scanHere(let url, _): return url
+        default: return nil
+        }
+    }
+
+    /// p: pins the highlighted folder to the home screen, or unpins it.
+    private func togglePin() {
+        guard rows.indices.contains(selected), let url = folderURL(rows[selected]) else {
+            message = ui.dim("Only folders can be pinned.")
+            return
+        }
+        let path = url.resolvingSymlinksInPath().path
+        let pinning = !pins.contains(path)
+        Database.open()?.setPinned(path, pinning)
+        message = pinning ? ui.green("✓") + " Pinned “\(url.lastPathComponent)” to the home screen · p again to unpin"
+            : ui.dim("Unpinned “\(url.lastPathComponent)”")
+        reload()
+    }
+
+    /// Where "Back to …" on the home screen goes.
+    private func remember(_ url: URL) {
+        Database.open()?.setState("last-folder", url.resolvingSymlinksInPath().path)
     }
 
     /// Ticking months: space ticks one (or a whole year), x ticks every month
     /// from the last one ticked to this one, a click ticks; enter scans
     /// what's ticked, or the highlighted month or year when nothing is.
     private func handleMonths(_ key: Terminal.Key) -> (handled: Bool, action: Action?) {
-        let armed = discardArmed
-        discardArmed = false
         switch key {
-        case .escape, .left, .backspace:
-            guard !ticked.isEmpty, !armed else { return (false, nil) }
-            discardArmed = true
-            message = ui.amber("Press esc again to drop \(ticked.count) ticked month\(ticked.count == 1 ? "" : "s")")
-            return (true, nil)
         case .char(" "): tick(selected)
         case .char("x"): tickRange()
+        case .char("c"):
+            guard !ticked.isEmpty else { return (true, nil) }
+            message = ui.dim("Cleared \(ticked.count) ticked month\(ticked.count == 1 ? "" : "s")")
+            ticked = []
+            anchor = nil
+            saveTicks()
         case .click(let row, _):
             let index = row - listTop + scroll
             if rows.indices.contains(index), isSelectable(rows[index]) {
@@ -291,6 +399,7 @@ final class App {
             if ticked.contains(start) { ticked.remove(start) } else { ticked.insert(start) }
             anchor = start
         }
+        saveTicks()
     }
 
     private func tickRange() {
@@ -300,6 +409,7 @@ final class App {
             if let month = monthStart(row), month >= low, month <= high { ticked.insert(month) }
         }
         anchor = end
+        saveTicks()
     }
 
     private func move(_ step: Int) {
@@ -318,11 +428,17 @@ final class App {
         case .months:
             screen = .months
             load()
-        case .browse(let url, _, _), .folder(let url):
+        case .browse(let url, _, _):
             screen = .browser(url)
+            load()
+        case .folder(let url):
+            // Somewhere inside: where "Back to …" will go.
+            screen = .browser(url)
+            remember(url)
             load()
         case .scanHere(let url, _): return opening ? nil : .scan(.folder(url))
         case .choose: prompt = ""
+        case .settings: return .settings
         }
         return nil
     }
@@ -357,6 +473,7 @@ final class App {
             if FileManager.default.fileExists(atPath: path, isDirectory: &isFolder), isFolder.boolValue {
                 prompt = nil
                 screen = .browser(URL(fileURLWithPath: path))
+                remember(URL(fileURLWithPath: path))
                 load()
                 return nil
             }
@@ -409,6 +526,7 @@ final class App {
             message = ui.red("PixelGraph needs access to Photos for that.")
             return .home
         }
+        if case .folder(let path) = source { remember(URL(fileURLWithPath: path)) }
         ui.term.write(ui.clear())
         let scanner = Scanner(source: source, options: options, fullScreen: true)
         ui.term.allowInterrupt(true)
@@ -491,7 +609,11 @@ final class App {
                     task(0, options.documents, "Sort documents", "receipts, forms, screenshots → PGDocuments"),
                     task(1, options.describe, "Tag scenes", "what's in each grouped photo: beach, dog, sunset"),
                     "",
-                ] + (replacing.map { last in [
+                ] + (already.map { text in [
+                    ui.green("✓ ") + text,
+                    ui.dim("Enter scans it again; esc goes back."),
+                    "",
+                ] } ?? []) + (replacing.map { last in [
                     ui.amber("This replaces your unfinished review of \(ui.fit(last.scope, 34)) (\(last.waiting) waiting)."),
                     ui.dim("Esc, then “Continue reviewing”, to go back to it instead."),
                     "",
@@ -543,16 +665,18 @@ final class App {
         case .scanHere(let url, _): action = ui.button("Scan \(ui.fit(url.lastPathComponent, 28))")
         case .browse, .folder, .months: action = ui.button("Open")
         case .resume: action = ui.button("Continue")
+        case .settings: action = ui.button("Open settings")
         default: action = ""
         }
         let backHint = screen == .home ? "" : " · ← back"
         let scanHint: String
         if case .browser = screen { scanHint = " · s scan this folder" } else { scanHint = "" }
+        let pinHint = rows.indices.contains(selected) && folderURL(rows[selected]) != nil ? " · p pin" : ""
         // The bar lines up with the column above it.
-        var hints = "↑↓ choose · enter \(screen == .home ? "scan" : "open")\(scanHint)\(backHint) · q quit"
-        var short = "↑↓ · enter\(backHint) · q"
+        var hints = "↑↓ choose · enter \(screen == .home ? "scan" : "open")\(scanHint)\(pinHint)\(backHint) · , settings · q quit"
+        var short = "↑↓ · enter\(backHint) · , settings · q"
         if screen == .months, rows.indices.contains(selected) {
-            hints = "↑↓ choose · space tick · x tick range · enter scan · ← back · q quit"
+            hints = "↑↓ choose · space tick · x tick range · c clear · enter scan · ← back · q quit"
             short = "space tick · x range · enter scan"
             if !ticked.isEmpty {
                 let photos = ticked.reduce(0) { $0 + (monthCounts[$1] ?? 0) }
@@ -570,33 +694,51 @@ final class App {
             + ui.spread(ui.dim(ui.clip(text, max(0, room))), action, width: columnWidth)
     }
 
+    /// "✓ reviewed · 12 Sep" for the latest of these places' progress, or "".
+    private func status(_ places: [String]) -> String {
+        guard let latest = places.compactMap({ statuses[$0] }).max(by: { $0.date < $1.date }) else { return "" }
+        return ui.green("✓ ") + ui.dim(latest.text)
+    }
+
+    private func status(_ url: URL) -> String { status(Source.folder(url).places) }
+
+    /// A row's detail, then its progress when there is any.
+    private func detail(_ text: String, _ status: String) -> String {
+        status.isEmpty ? ui.dim(text) : text.isEmpty ? status : ui.dim(text) + "   " + status
+    }
+
     private func render(_ row: Row, width: Int) -> String {
         switch row {
         case .heading(let text): return ui.dim(text)
         case .resume(let scope, let detail):
             return ui.spread(ui.bold("Continue reviewing ") + scope, ui.dim(detail), width: width)
-        case .source(let source, let detail):
-            return ui.spread(source.description, ui.dim(detail), width: width)
+        case .source(let source, let text):
+            return ui.spread(source.description, detail(text, status(source.places)), width: width)
         case .months(let total):
             return ui.spread("All photos, by month…", ui.dim("\(total.formatted()) photos"), width: width)
         case .year(let year, let months, let count):
             let all = months.allSatisfy(ticked.contains), some = months.contains(where: ticked.contains)
             let box = all ? ui.green("[✓]") : some ? ui.green("[–]") : ui.dim("[ ]")
-            return ui.spread(box + " " + ui.bold(String(year)), ui.dim("\(count.formatted()) photos"), width: width)
+            let done = months.filter { statuses[Source.monthPlace($0)] != nil }.count
+            let progress = done == 0 ? "" : ui.green("✓ ") + ui.dim("\(done) of \(months.count) months")
+            return ui.spread(box + " " + ui.bold(String(year)), detail("\(count.formatted()) photos", progress), width: width)
         case .month(let source, let count):
             let start = monthStart(row)
             let box = start.map(ticked.contains) == true ? ui.green("[✓]") : ui.dim("[ ]")
             let name = start.map { Self.monthName.string(from: $0) } ?? source.description
-            return ui.spread("    " + box + " " + name, ui.dim("\(count.formatted()) photos"), width: width)
-        case .browse(_, let title, let detail):
-            return ui.spread(title, ui.dim(detail), width: width)
+            return ui.spread("    " + box + " " + name, detail("\(count.formatted()) photos", status(source.places)), width: width)
+        case .browse(let url, let title, let text):
+            return ui.spread(title, detail(text, status(url)), width: width)
         case .choose:
             return ui.dim("Choose another folder…")
         case .scanHere(let url, let count):
             let here = count > 0 ? "\(count) images here, plus subfolders" : "includes subfolders"
-            return ui.spread(ui.bold("Scan “\(url.lastPathComponent)”"), ui.dim(here), width: width)
+            return ui.spread(ui.bold("Scan “\(url.lastPathComponent)”"), detail(here, status(url)), width: width)
         case .folder(let url):
-            return url.lastPathComponent + ui.dim("  ›")
+            let pinned = pins.contains(url.resolvingSymlinksInPath().path) ? "pinned" : ""
+            return ui.spread(url.lastPathComponent + ui.dim("  ›"), detail(pinned, status(url)), width: width)
+        case .settings(let changed):
+            return ui.spread("Settings…", ui.dim(changed == 0 ? "all defaults" : "\(changed) changed"), width: width)
         }
     }
 }

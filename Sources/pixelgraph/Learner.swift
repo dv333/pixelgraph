@@ -113,8 +113,8 @@ struct Eval: AsyncParsableCommand {
     @Option(help: "Also test a local vision model through Ollama against your decisions, e.g. qwen2.5vl:32b.")
     var judgeModel: String?
 
-    @Option(help: "The confidence the nightly run would require (0–1).")
-    var judgeConfidence = 0.85
+    @Option(help: "The confidence the nightly run would require, 0–1 (Settings: 0.85).")
+    var judgeConfidence: Double?
 
     @Option(help: "Test on at most this many reviewed groups (each takes a few seconds).")
     var limit = 40
@@ -122,7 +122,10 @@ struct Eval: AsyncParsableCommand {
     func run() async throws {
         Swift.print(Self.report())
         if let judgeModel {
-            Swift.print("\n" + (try await Self.judgeReport(Judge(model: judgeModel), threshold: judgeConfidence, limit: limit)))
+            let settings = Settings.load()
+            let judge = Judge(model: judgeModel, host: settings.ollamaHost)
+            let threshold = judgeConfidence ?? settings.number(.judgeConfidence)
+            Swift.print("\n" + (try await Self.judgeReport(judge, threshold: threshold, limit: limit)))
         }
     }
 

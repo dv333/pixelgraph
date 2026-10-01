@@ -7,7 +7,7 @@ import Foundation
 /// real images in iTerm2 or colour blocks elsewhere.
 final class UI: @unchecked Sendable {
     let term = Terminal()
-    let sharp: Bool
+    var sharp: Bool
     private(set) var active = false
 
     private var images: [String: CGImage] = [:]

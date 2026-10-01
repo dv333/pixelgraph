@@ -114,6 +114,7 @@ enum Mover {
             let landed = record.files.isEmpty ? ids : record.files.map { "file:" + $0.to }
             Staged.add(landed, place: record.place ?? target.album)
         }
+        Places.note(.moved, source, moved: ids.count)
         return record
     }
 
