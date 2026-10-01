@@ -279,7 +279,6 @@ final class ReviewSession {
         switch current {
         case .reason:
             let id = order[cursor].id
-            switch key {
             let forAll = allSelected
             func apply(_ reason: String) {
                 if forAll { reasonForAll(reason) } else { setReason(id, reason) }
