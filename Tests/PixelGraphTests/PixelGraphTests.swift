@@ -229,12 +229,29 @@ struct MoveTests {
         _ = try await Mover.move([Item.fileID(folder.appendingPathComponent("receipt.jpg"))], from: source, to: .documents, batch: batch)
         _ = try await Mover.move([Item.fileID(folder.appendingPathComponent("receipt copy.jpg"))], from: source, to: .duplicates, batch: batch)
         #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("PGDocuments/receipt.jpg").path))
-        #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("PixelGraph Duplicates/receipt copy.jpg").path))
+        #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("PGDuplicates/receipt copy.jpg").path))
 
         let undone = try await Mover.undoLast()
         #expect(undone?.ids.count == 2)
         #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("receipt.jpg").path))
         #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("receipt copy.jpg").path))
+    }
+
+    @Test func deletingFromAFolderUsesTheTrashAndUndoPutsItBack() async throws {
+        let folder = try scratchFolder()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let shot = folder.appendingPathComponent("IMG_7.JPG")
+        FileManager.default.createFile(atPath: shot.path, contents: Data("x".utf8))
+        FileManager.default.createFile(atPath: folder.appendingPathComponent("IMG_7.xmp").path, contents: Data("x".utf8))
+
+        let record = try await Mover.move([Item.fileID(shot)], from: .folder(path: folder.path), to: .trash)
+        #expect(record.files.count == 2)
+        #expect(!FileManager.default.fileExists(atPath: shot.path))
+        #expect(!FileManager.default.fileExists(atPath: folder.appendingPathComponent(Files.duplicatesFolder).path))
+
+        try await Mover.undoLast()
+        #expect(FileManager.default.fileExists(atPath: shot.path))
+        #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("IMG_7.xmp").path))
     }
 }
 

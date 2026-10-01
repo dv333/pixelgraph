@@ -1,6 +1,6 @@
 # PixelGraph
 
-Find near-identical photos, keep the best, and move the rest to Duplicates — on your Mac, with nothing uploaded and nothing deleted for good.
+Find near-identical photos, keep the best, and move the rest to PGDuplicates or delete them — on your Mac, with nothing uploaded.
 
 PixelGraph groups retakes, bursts, portraits where only the expression changes, copies and edits, the same scene revisited, and repeated screenshots. It picks the best shot in each group, flags photos with closed eyes or blocked faces, and pre-selects everything else to move. You confirm, it moves, and you can undo.
 
@@ -55,7 +55,7 @@ One key means one thing on every screen, and keys set a state rather than toggli
 | B | make it the best ★ |
 | R | say why it's moving |
 | C | compare two photos side by side: ← → change the candidate, ↑ pins it |
-| M | move the selection to Duplicates — always asks first |
+| M | move the selection to PGDuplicates, or D in the sheet to delete it — always asks first |
 | U | undo the last change or move |
 | ? | all the keys |
 | Q | quit — everything is saved as you go |
@@ -72,9 +72,14 @@ Photos in groups get a one-line description from Apple's on-device model ("Famil
 
 ### Where moved photos go
 
-- **Apple Photos, album scans:** into a "PixelGraph Duplicates" album (documents: "PGDocuments"), and out of the album you scanned. They stay in your library until you delete them from that album. Albums Photos won't let apps change (synced from your Mac, shared) keep their photos; PixelGraph tells you when that happens.
-- **Apple Photos, library scans:** duplicates are added to "PixelGraph Duplicates" and deleted from the library, so they go to Recently Deleted for 30 days (macOS asks first). Recover them there; `pixelgraph undo` can't. Documents stay in the library, in "PGDocuments".
-- **Folders and drives:** into a "PixelGraph Duplicates" (or "PGDocuments") folder inside the scanned folder, keeping the folder layout. RAW+JPEG pairs and `.xmp`/`.aae` sidecars move together.
+When you press M, PixelGraph asks what to do with the copies: **Enter** moves them to PGDuplicates, **D** deletes them. Documents are always filed in PGDocuments.
+
+- **Apple Photos, move:** into a "PGDuplicates" album, and out of the album you scanned. They stay in your library until you delete them from that album. Albums Photos won't let apps change (synced from your Mac, shared) keep their photos; PixelGraph tells you when that happens.
+- **Apple Photos, delete:** to Recently Deleted for 30 days (macOS asks first). Recover them there; `pixelgraph undo` can't.
+- **Folders and drives, move:** into a "PGDuplicates" (or "PGDocuments") folder inside the scanned folder, keeping the folder layout. RAW+JPEG pairs and `.xmp`/`.aae` sidecars move together.
+- **Folders and drives, delete:** to the Trash, with their RAW and sidecar files; undo puts them back.
+
+Moves made before the rename went to "PixelGraph Duplicates"; that album or folder is left as it is, and undo still finds them.
 
 ### Descriptions for the photos you keep
 

@@ -1,19 +1,20 @@
 import Foundation
 
-/// Moves photos to Duplicates or PGDocuments, and back.
+/// Moves photos to PGDuplicates or PGDocuments, or deletes them, and back.
 ///
-/// Apple Photos: into the "PixelGraph Duplicates" album and out of the album
-/// that was scanned. Duplicates from a library scan (no album to take them
-/// out of) are also deleted, to Recently Deleted. Folders and drives: into a
-/// "PixelGraph Duplicates" folder inside the scanned folder, keeping the
-/// layout, with RAW twins and sidecars alongside. Every move is logged so the
-/// last one can be undone.
+/// Apple Photos: into the "PGDuplicates" album and out of the album that was
+/// scanned, or deleted to Recently Deleted. Folders and drives: into a
+/// "PGDuplicates" folder inside the scanned folder, keeping the layout, or
+/// into the Trash; RAW twins and sidecars go along. Every move is logged so
+/// the last one can be undone (photos deleted from Photos excepted).
 enum Mover {
     enum Destination: String, Codable {
         case duplicates, documents
+        /// Recently Deleted in Photos, the Trash for files.
+        case trash
 
-        var album: String { self == .duplicates ? Library.duplicatesAlbum : Library.documentsAlbum }
-        var folder: String { self == .duplicates ? Files.duplicatesFolder : Files.documentsFolder }
+        var album: String { self == .documents ? Library.documentsAlbum : Library.duplicatesAlbum }
+        var folder: String { self == .documents ? Files.documentsFolder : Files.duplicatesFolder }
     }
 
     struct Record: Codable {
@@ -33,6 +34,15 @@ enum Mover {
         var leftInSource: Bool?
         /// Captions written to the photos kept, with what they had before.
         var captions: [Captions.Change]?
+        /// The album or folder they went into; nil in records from before
+        /// PGDuplicates, when Duplicates was "PixelGraph Duplicates".
+        var place: String?
+
+        /// The album they went into, for undo.
+        var album: String {
+            if let place { return place }
+            return destination == .documents ? Library.documentsAlbum : Library.oldDuplicatesAlbum
+        }
     }
 
     struct FileMove: Codable {
@@ -45,16 +55,28 @@ enum Mover {
     static func move(_ ids: [String], from source: Source, to target: Destination = .duplicates,
                      batch: UUID = UUID()) async throws -> Record {
         var record = Record(date: .now, source: source, destination: target, batch: batch, ids: ids, files: [])
-        switch source {
-        case .album(let id, _):
+        switch (source, target) {
+        case (.album, .trash), (.dates, .trash):
+            try await Library.delete(ids)
+            record.deleted = true
+        case (.album(let id, _), _):
+            record.place = target.album
             let removed = try await Library.move(ids, to: target.album, from: id)
             if !removed { record.leftInSource = true }
-        case .dates:
-            // Documents are the copies being kept, so only duplicates are deleted.
-            let delete = target == .duplicates
-            try await Library.move(ids, to: target.album, from: nil, delete: delete)
-            if delete { record.deleted = true }
-        case .folder(let path):
+        case (.dates, _):
+            record.place = target.album
+            try await Library.move(ids, to: target.album, from: nil)
+        case (.folder, .trash):
+            for id in ids where id.hasPrefix("file:") {
+                let file = URL(fileURLWithPath: String(id.dropFirst(5))).resolvingSymlinksInPath()
+                for url in [file] + Files.companions(of: file).map({ $0.resolvingSymlinksInPath() }) {
+                    var trashed: NSURL?
+                    try FileManager.default.trashItem(at: url, resultingItemURL: &trashed)
+                    if let trashed = trashed as URL? { record.files.append(FileMove(from: url.path, to: trashed.path)) }
+                }
+            }
+        case (.folder(let path), _):
+            record.place = target.folder
             // Resolve symlinks (/var → /private/var) so paths line up.
             let root = URL(fileURLWithPath: path).resolvingSymlinksInPath()
             let destination = root.appendingPathComponent(target.folder, isDirectory: true)
@@ -107,10 +129,9 @@ enum Mover {
                 try save(records)
                 continue
             }
-            let destination = record.destination ?? .duplicates
             switch record.source {
-            case .album(let id, _): try await Library.restore(record.ids, from: destination.album, to: id)
-            case .dates: try await Library.restore(record.ids, from: destination.album, to: nil)
+            case .album(let id, _): try await Library.restore(record.ids, from: record.album, to: id)
+            case .dates: try await Library.restore(record.ids, from: record.album, to: nil)
             case .folder:
                 for move in record.files.reversed() {
                     let back = URL(fileURLWithPath: move.from)
@@ -151,10 +172,10 @@ enum Mover {
         return candidate
     }
 
-    /// Tidies up folders left empty under "PixelGraph Duplicates" after an undo.
+    /// Tidies up folders left empty under PGDuplicates or PGDocuments after an undo.
     private static func removeEmptyFolders(from folder: URL) {
         var current = folder
-        while current.path.contains("/\(Files.duplicatesFolder)") || current.path.contains("/\(Files.documentsFolder)"),
+        while Files.ownFolders.contains(where: { current.path.contains("/\($0)") }),
               let contents = try? FileManager.default.contentsOfDirectory(atPath: current.path),
               contents.filter({ $0 != ".DS_Store" }).isEmpty {
             try? FileManager.default.removeItem(at: current)

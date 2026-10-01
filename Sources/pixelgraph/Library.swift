@@ -38,7 +38,7 @@ enum Library {
         var result: [Album] = []
         PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: nil)
             .enumerateObjects { collection, _, _ in
-                guard collection.localizedTitle != duplicatesAlbum, collection.localizedTitle != documentsAlbum else { return }
+                guard let title = collection.localizedTitle, !ownAlbums.contains(title) else { return }
                 let count = PHAsset.fetchAssets(in: collection, options: imagesOnly()).count
                 guard count > 0 else { return }
                 result.append(Album(id: collection.localIdentifier, title: collection.localizedTitle ?? "Untitled",
@@ -99,15 +99,18 @@ enum Library {
 
     // MARK: - Duplicates album
 
-    static let duplicatesAlbum = "PixelGraph Duplicates"
+    static let duplicatesAlbum = "PGDuplicates"
     static let documentsAlbum = "PGDocuments"
+    /// What the Duplicates album was called before; moves made then went there.
+    static let oldDuplicatesAlbum = "PixelGraph Duplicates"
+    /// Albums PixelGraph makes, left out of the albums you can scan.
+    static let ownAlbums: Set<String> = [duplicatesAlbum, documentsAlbum, oldDuplicatesAlbum]
 
     /// Adds photos to the album called `destination` (creating it if needed)
-    /// and takes them out of `album`. With `delete`, also deletes them from
-    /// the library: they go to Recently Deleted, and macOS asks first.
-    /// Returns false when `album` can't be changed, so they're still in it.
+    /// and takes them out of `album`. Nothing leaves the library. Returns
+    /// false when `album` can't be changed, so they're still in it.
     @discardableResult
-    static func move(_ ids: [String], to destination: String, from album: String?, delete: Bool = false) async throws -> Bool {
+    static func move(_ ids: [String], to destination: String, from album: String?) async throws -> Bool {
         let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
         let existing = Library.album(named: destination)
         let source = album.flatMap { PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [$0], options: nil).firstObject }
@@ -116,21 +119,18 @@ enum Library {
             let duplicates = existing.flatMap { PHAssetCollectionChangeRequest(for: $0) }
                 ?? PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: destination)
             duplicates.addAssets(assets)
-            if let source, removable, !delete {
+            if let source, removable {
                 PHAssetCollectionChangeRequest(for: source)?.removeAssets(assets)
             }
         }
-        guard delete else { return removable }
-        // Deleted separately, after they're in the album, so recovering them
-        // from Recently Deleted brings them back to it. If the deletion is
-        // turned down, take them back out so nothing has changed.
-        do {
-            try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.deleteAssets(assets) }
-        } catch {
-            try? await restore(ids, from: destination, to: nil)
-            throw error
-        }
-        return true
+        return removable
+    }
+
+    /// Deletes photos from the library: they go to Recently Deleted for 30
+    /// days, and macOS asks first (turning it down throws, changing nothing).
+    static func delete(_ ids: [String]) async throws {
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.deleteAssets(assets) }
     }
 
     /// Why PixelGraph can't take photos out of an album ("synced from your

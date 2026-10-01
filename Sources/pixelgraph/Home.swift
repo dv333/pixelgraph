@@ -142,7 +142,7 @@ final class App {
         let images = contents.filter { Files.imageExtensions.contains($0.pathExtension.lowercased()) }.count
         rows.append(.scanHere(url, count: images))
         let folders = contents.filter {
-            (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true && $0.lastPathComponent != Files.duplicatesFolder
+            (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true && !Files.ownFolders.contains($0.lastPathComponent)
         }.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         if !folders.isEmpty { rows.append(.heading("FOLDERS")) }
         rows += folders.map(Row.folder)

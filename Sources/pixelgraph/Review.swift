@@ -221,9 +221,12 @@ final class ReviewSession {
             sheet = nil
         case .confirm(let file, let duplicates, let describe):
             switch key {
-            case .enter, .char("y"):
+            case .enter, .char("y"), .char("p"):
                 sheet = nil
-                await move(file: file, duplicates: duplicates, describe: describe)
+                await move(file: file, duplicates: duplicates, to: .duplicates, describe: describe)
+            case .char("d") where !duplicates.isEmpty:
+                sheet = nil
+                await move(file: file, duplicates: duplicates, to: .trash, describe: describe)
             case .escape, .backspace, .click, .char("n"): sheet = nil
             default: break
             }
@@ -372,7 +375,7 @@ final class ReviewSession {
     }
 
     private func movedAlready() {
-        toast = ui.dim("Already moved to Duplicates · u to put it back")
+        toast = ui.dim("Already moved · u to put it back")
     }
 
     /// k on a group: keep every photo in it.
@@ -414,10 +417,10 @@ final class ReviewSession {
         sheet = .confirm(file: file, duplicates: selected, describe: describe)
     }
 
-    private func move(file: [String], duplicates: [String], describe keepers: [String]) async {
+    private func move(file: [String], duplicates: [String], to target: Mover.Destination, describe keepers: [String]) async {
         func count(_ n: Int) -> String { "\(n) photo\(n == 1 ? "" : "s")" }
-        let deletes: Bool
-        if case .dates = source { deletes = true } else { deletes = false }
+        let deletes = target == .trash
+        let bin = source.isPhotos ? "Recently Deleted" : "the Trash"
         let total = (file.isEmpty ? 0 : 1) + (duplicates.isEmpty ? 0 : 1) + keepers.count
         var done = 0
         func step(_ detail: String) { showProgress(done: done, total: total, detail: detail) }
@@ -431,8 +434,8 @@ final class ReviewSession {
                 done += 1
             }
             if !duplicates.isEmpty {
-                step(deletes ? "Deleting \(count(duplicates.count))…" : "Moving \(count(duplicates.count)) to Duplicates…")
-                records.append(try await Mover.move(duplicates, from: source, to: .duplicates, batch: batch))
+                step(deletes ? "Deleting \(count(duplicates.count))…" : "Moving \(count(duplicates.count)) to PGDuplicates…")
+                records.append(try await Mover.move(duplicates, from: source, to: target, batch: batch))
                 done += 1
             }
             run.markMoved(file + duplicates)
@@ -449,8 +452,7 @@ final class ReviewSession {
             var parts: [String] = []
             if !file.isEmpty { parts.append("filed \(file.count) in PGDocuments") }
             if !duplicates.isEmpty {
-                parts.append(records.contains { $0.deleted == true }
-                             ? "deleted \(duplicates.count) to Recently Deleted" : "moved \(duplicates.count) to Duplicates")
+                parts.append(deletes ? "deleted \(duplicates.count) to \(bin)" : "moved \(duplicates.count) to PGDuplicates")
             }
             if !captioned.isEmpty { parts.append("described \(captioned.count) kept") }
             var message = ui.green("✓") + " " + parts.joined(separator: ", ").capitalizedFirst
@@ -649,11 +651,11 @@ final class ReviewSession {
     private func fileButton(_ filing: Int, copies: Int) -> String {
         guard filing + copies > 0 else { return ui.dim("nothing to file") }
         var label = "m · File \(filing) in PGDocuments"
-        if copies > 0 { label += ", \(copies) to Duplicates" }
+        if copies > 0 { label += ", move \(copies) cop\(copies == 1 ? "y" : "ies")" }
         return ui.button(label)
     }
 
-    private func moveButton(_ count: Int, label: String = "Move to Duplicates") -> String {
+    private func moveButton(_ count: Int, label: String = "Move or delete") -> String {
         count > 0 ? ui.dim("\(count) selected  ") + ui.button("m · \(label)") : ui.dim("nothing selected")
     }
 
@@ -696,7 +698,7 @@ final class ReviewSession {
             let copies = ids.filter { g.pick.willMove($0) }.count
             var parts: [String] = []
             if filing > 0 { parts.append(ui.blue("→ PGDocuments")) }
-            if copies > 0 { parts.append(ui.dim("\(copies) cop\(copies == 1 ? "y" : "ies") → Duplicates")) }
+            if copies > 0 { parts.append(ui.dim("\(copies) cop\(copies == 1 ? "y" : "ies") to move")) }
             if !g.pick.kept.isEmpty { parts.append(ui.dim("keep here")) }
             if !g.pick.moved.isEmpty { parts.append(ui.green("\(g.pick.moved.count) moved")) }
             return parts.joined(separator: ui.dim(" · ")) + ui.dim(" · " + Format.day.string(from: g.photos[0].date))
@@ -955,7 +957,7 @@ final class ReviewSession {
             switch state {
             case .best: return ui.blue(" \(number) → PGDocuments ")
             case .keep: return " \(number) Keep here "
-            case .move: return ui.dim(" \(number) → Duplicates ")
+            case .move: return ui.dim(" \(number) → Move ")
             case .moved: return ui.dim(" \(number) Moved ")
             }
         }
@@ -983,7 +985,7 @@ final class ReviewSession {
         switch state {
         case .best: return ui.wrap(note, width: width, lines: 2).map { self.ui.green($0) }
         case .keep: return ui.wrap("Keep · " + (pick.decidedBy == "you" ? "you chose" : note), width: width, lines: 2)
-        case .moved: return [ui.dim(ui.fit("Moved to Duplicates", width))]
+        case .moved: return [ui.dim(ui.fit("Moved", width))]
         case .move:
             if let reason = pick.reasons[id] ?? pick.suggestions[id] {
                 return [ui.blue("Move · ") + ui.amber(ui.fit(reason, width - 7))]
@@ -1145,7 +1147,7 @@ final class ReviewSession {
             row("d", "documents tab: file this copy in PGDocuments"),
             row("tab", "switch between Duplicates and Documents"),
             "",
-            row("m", "move the selection to Duplicates (asks first)"),
+            row("m", "move the selection to PGDuplicates or delete it (asks first)"),
             row("u", "undo the last change or move"),
             row("v", "mosaics or filmstrips"),
             row("n  p", "next or previous group"),
@@ -1171,56 +1173,48 @@ final class ReviewSession {
         return ui.sheet(lines)
     }
 
+    /// The move sheet: enter (or p) moves the copies to PGDuplicates, d
+    /// deletes them instead. Documents are always filed in PGDocuments.
     private func confirmSheet(file: [String], duplicates: [String], describe: [String]) -> String {
         func count(_ n: Int) -> String { "\(n) photo\(n == 1 ? "" : "s")" }
-        var title: String
-        let deletes: Bool
-        if case .dates = source { deletes = true } else { deletes = false }
-        switch (file.isEmpty, duplicates.isEmpty) {
-        case (false, false) where deletes: title = "File \(file.count) in PGDocuments and delete \(count(duplicates.count))?"
-        case (false, false): title = "File \(file.count) in PGDocuments and move \(count(duplicates.count)) to Duplicates?"
-        case (false, true): title = "File \(count(file.count)) in PGDocuments?"
-        case _ where deletes: title = "Delete \(count(duplicates.count))?"
-        default: title = "Move \(count(duplicates.count)) to \(source.isPhotos ? "“\(Library.duplicatesAlbum)”" : "Duplicates")?"
+        let width = min(ui.cols - 2, 64) - 4
+        var lines: [String]
+        if duplicates.isEmpty {
+            lines = [ui.bold("File \(count(file.count)) in PGDocuments?"), ""]
+        } else {
+            lines = [ui.bold(file.isEmpty ? "What should happen to \(count(duplicates.count))?"
+                             : "File \(file.count) in PGDocuments. What about \(count(duplicates.count))?"), ""]
         }
-        let detail: [String]
+        let keep: String
         switch source {
         case .album(let id, let name):
             if let reason = Library.readOnlyReason(id) {
-                detail = ["\(name) is \(reason), so they can’t leave it:",
-                          "they’ll be added to the \(file.isEmpty ? "Duplicates" : "PGDocuments and Duplicates") album\(file.isEmpty ? "" : "s") but stay in \(name)."]
+                keep = "added to the “\(Library.duplicatesAlbum)” album; \(name) is \(reason), so they stay in it too"
             } else {
-                detail = ["They’ll leave \(name) but stay in your library.",
-                          file.isEmpty ? "Delete them from the Duplicates album whenever you’re ready." : "Documents go to the PGDocuments album."]
+                keep = "out of \(name), into the “\(Library.duplicatesAlbum)” album; still in your library"
             }
         case .dates:
-            switch (file.isEmpty, duplicates.isEmpty) {
-            case (false, true):
-                detail = ["They stay in your library, collected in the", "PGDocuments album."]
-            default:
-                detail = ["Duplicates go to Recently Deleted in Photos (kept 30 days);",
-                          file.isEmpty ? "macOS asks first. PixelGraph can’t undo this." : "documents stay, in PGDocuments. PixelGraph can’t undo this."]
-            }
+            keep = "into the “\(Library.duplicatesAlbum)” album; still in your library"
         case .folder(let path):
-            let name = (path as NSString).lastPathComponent
-            switch (file.isEmpty, duplicates.isEmpty) {
-            case (false, false):
-                detail = ["Documents go into “\(Files.documentsFolder)” and copies into",
-                          "“\(Files.duplicatesFolder)”, both inside \(name)."]
-            case (false, true):
-                detail = ["They’ll go into “\(Files.documentsFolder)” inside \(name),", "with their RAW and sidecar files."]
-            default:
-                detail = ["They’ll go into “\(Files.duplicatesFolder)” inside \(name),", "with their RAW and sidecar files."]
-            }
+            keep = "into “\(Files.duplicatesFolder)” inside \((path as NSString).lastPathComponent), with RAW and sidecars"
         }
-        var lines = [ui.bold(title), ""]
-        lines += detail.map { ui.dim($0) }
+        if !duplicates.isEmpty {
+            let gone = source.isPhotos
+                ? "to Recently Deleted in Photos (30 days); macOS asks first; PixelGraph can’t undo it"
+                : "to the Trash, with RAW and sidecars; u puts them back"
+            lines += [ui.blue("enter") + "  Move to PGDuplicates"] + ui.wrap(keep, width: width - 7, lines: 2).map { "       " + ui.dim($0) }
+            lines += ["", ui.blue("d") + "      Delete"] + ui.wrap(gone, width: width - 7, lines: 2).map { "       " + ui.dim($0) }
+        }
+        if !file.isEmpty, !source.isPhotos {
+            lines += ["", ui.dim("Documents go into “\(Files.documentsFolder)” inside the folder.")]
+        }
         if !describe.isEmpty {
             lines += ["", ui.dim("The \(count(describe.count)) you keep get a caption, title and"),
                       ui.dim(source.isPhotos ? "keywords in Photos, after what’s already there." : "keywords in their files, after what’s already there.")]
         }
-        let total = file.count + duplicates.count
-        lines += ["", ui.spread("", ui.dim("esc Cancel   ") + ui.button("enter \(file.isEmpty ? (deletes ? "Delete" : "Move") : "File") \(total)"), width: min(ui.cols - 2, 64) - 4)]
+        let hints = ui.dim(duplicates.isEmpty ? "esc Cancel   " : "esc Cancel   d Delete   ")
+        let action = duplicates.isEmpty ? "enter File \(file.count)" : "enter Move \(duplicates.count + file.count)"
+        lines += ["", ui.spread("", hints + ui.button(action), width: width)]
         return ui.sheet(lines, width: 68)
     }
 
