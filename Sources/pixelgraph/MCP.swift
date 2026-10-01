@@ -243,7 +243,7 @@ final class MCPServer: @unchecked Sendable {
             try await Library.requestAccess()
             let albums = Library.albums().prefix(40).map { ["album": $0.title, "photos": $0.count] as [String: Any] }
             var info: [String: Any] = ["albums": Array(albums), "library_photos": Library.totalCount()]
-            if let oldest = Library.oldestDate() { info["oldest_photo"] = ISO8601DateFormatter().string(from: oldest) }
+            if let oldest = Library.oldestDate() { info["oldest_photo"] = oldest.formatted(.iso8601) }
             info["recent"] = Recents.all().prefix(8).map { $0.source.description }
             return text(info)
 

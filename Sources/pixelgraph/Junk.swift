@@ -78,7 +78,7 @@ enum Junk {
     /// the file name for folders. Lower-cased.
     static func origin(_ item: Item) -> String {
         switch item.backing {
-        case .photo(let asset): return PHAssetResource.assetResources(for: asset).first?.originalFilename.lowercased() ?? ""
+        case .photo(let asset): return PHAssetResource.assetResources(for: asset).first?.filename.lowercased() ?? ""
         case .file(let url): return url.lastPathComponent.lowercased()
         }
     }

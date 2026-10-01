@@ -118,12 +118,6 @@ enum Agent {
         return all.filter { p in let g = group(run, p); return g.photos.contains { g.pick.willMove($0.id) } }
     }
 
-    private static let day: ISO8601DateFormatter = {
-        let f = ISO8601DateFormatter()
-        f.formatOptions = [.withFullDate, .withTime, .withColonSeparatorInTime]
-        return f
-    }()
-
     /// One group as an assistant reads it.
     static func describe(_ group: Run.Group, place: Place) -> [String: Any] {
         let scores = Picker.score(Picker.raws(group.photos), weights: .current())
@@ -134,7 +128,7 @@ enum Agent {
                 : pick.kept.contains(member.id) ? "keep" : "move"
             var photo: [String: Any] = [
                 "photo": letter(i),
-                "taken": day.string(from: member.date),
+                "taken": member.date.formatted(.iso8601),
                 "state": state,
                 "size": "\(member.width)×\(member.height)",
                 "score": Int((scores[i].total * 100).rounded()),

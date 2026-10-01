@@ -49,7 +49,7 @@ struct Auto: AsyncParsableCommand {
         print("Review them with `pixelgraph review --nightly`, or ask your assistant.")
 
         var entry: [String: Any] = [
-            "date": ISO8601DateFormatter().string(from: started), "scope": run.scope, "scanned": run.scanned,
+            "date": started.formatted(.iso8601), "scope": run.scope, "scanned": run.scanned,
             "moved": moved.photos, "dry_run": dryRun, "close_calls": closeCalls, "junk_groups": junk, "summary": summary,
         ]
         if let assistant, closeCalls > 0, !dryRun {
