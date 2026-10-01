@@ -70,7 +70,7 @@ Receipts, bills, forms, letters, IDs, tickets, notes, whiteboards, screenshots a
 
 ### Descriptions and scene tags
 
-Photos in groups get a one-line description from Apple's on-device model ("Family posing on rocks by the ocean") and scene tags from Vision ("beach, rocks"), shown under each photo and in the enlarged view. Choose what runs each time from the home screen, or use `--no-documents` and `--no-describe`.
+Photos in groups get scene tags from Vision ("beach, rocks"), shown under each photo and in the enlarged view. Written descriptions are made only when you move, for the photos you keep (see below). Choose what runs each time from the home screen, or use `--no-documents` and `--no-describe`.
 
 ### Where moved photos go
 

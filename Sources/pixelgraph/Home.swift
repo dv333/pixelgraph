@@ -342,7 +342,7 @@ final class App {
                     "",
                     task(nil, true, "Clean up duplicates", "keep the best, move the rest"),
                     task(0, options.documents, "Sort documents", "receipts, forms, screenshots → PGDocuments"),
-                    task(1, options.describe, "Describe photos", "a short description and scene tags"),
+                    task(1, options.describe, "Tag scenes", "what's in each grouped photo: beach, dog, sunset"),
                     "",
                     ui.dim("↑↓ choose · space tick · enter start · esc back"),
                 ], width: 82)

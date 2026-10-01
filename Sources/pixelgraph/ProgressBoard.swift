@@ -108,14 +108,26 @@ final class ProgressBoard: @unchecked Sendable {
         guard force || Date.now.timeIntervalSince(lastDraw) > 0.05 else { return }
         lastDraw = .now
 
-        let width = terminalWidth()
+        let (width, height) = terminalSize()
         var lines = ["", "  " + bold(heading), ""]
-        for stage in stages { lines.append(line(stage, width: width)) }
+        for stage in stages { lines.append(line(stage, width: min(width, 110))) }
         lines.append("")
         lines.append("  " + (summary.isEmpty ? "" : dim(finished ? "Found: " : "So far: ") + summary))
         lines.append(finished ? "" : "  " + dim("ctrl-c to stop · progress is saved, run again to resume"))
 
-        var out = fullScreen ? "\u{1B}[H" : (drawnLines > 0 ? "\u{1B}[\(drawnLines)F" : "")
+        var out: String
+        if fullScreen {
+            // Full screen: the block sits in the middle, a third of the way
+            // down, its lines still left-aligned so the columns line up. Its
+            // width is fixed by the heading so it doesn't shift as details grow.
+            let block = max(80, visibleWidth(heading) + 4)
+            let left = String(repeating: " ", count: max(0, (width - block) / 2))
+            let top = max(0, (height - lines.count) / 3)
+            out = "\u{1B}[H" + String(repeating: "\u{1B}[K\n", count: top)
+            lines = lines.map { left + $0 }
+        } else {
+            out = drawnLines > 0 ? "\u{1B}[\(drawnLines)F" : ""
+        }
         out += lines.map { $0 + "\u{1B}[0m\u{1B}[K" }.joined(separator: "\n") + "\n"
         drawnLines = lines.count
         write(out)
@@ -175,9 +187,15 @@ final class ProgressBoard: @unchecked Sendable {
             : "\(Int(seconds) / 60)m \(Int(seconds) % 60)s"
     }
 
-    private func terminalWidth() -> Int {
+    private func terminalSize() -> (columns: Int, rows: Int) {
         var ws = winsize()
-        return ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 ? Int(ws.ws_col) : 80
+        guard ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0, ws.ws_col > 0 else { return (80, 24) }
+        return (Int(ws.ws_col), Int(max(ws.ws_row, 1)))
+    }
+
+    /// Columns a styled string takes on screen, escape codes left out.
+    private func visibleWidth(_ styled: String) -> Int {
+        styled.replacingOccurrences(of: "\u{1B}\\[[0-9;?]*[A-Za-z]", with: "", options: .regularExpression).count
     }
 
     private func write(_ text: String) { FileHandle.standardOutput.write(Data(text.utf8)) }

@@ -10,7 +10,7 @@ struct Scanner {
         var offline = false
         /// Gather documents into their own tab, to file in PGDocuments.
         var documents = true
-        /// Describe and tag the photos in groups.
+        /// Tag what's in the photos in groups (Vision scene tags; fast).
         var describe = true
         /// Gather photos that look like rejects on their own into the Junk tab.
         var junk = true
@@ -21,7 +21,7 @@ struct Scanner {
     let board: ProgressBoard
 
     static let stages = ["Read photos", "Fingerprint", "Find documents", "Group lookalikes", "Score grouped photos",
-                         "Check eyes and faces", "Describe photos", "Pick the best shots", "Prepare previews"]
+                         "Check eyes and faces", "Tag scenes", "Pick the best shots", "Prepare previews"]
 
     init(source: Source, options: Options, fullScreen: Bool = false) {
         self.source = source
@@ -69,7 +69,8 @@ struct Scanner {
         for members in groupedNow {
             problems.merge(Inspector.compare(members)) { model, _ in model }
         }
-        let described = options.describe ? try await describe(groupedNow.flatMap { $0 }, lookup, useModel: useModel) : [:]
+        // Scene tags only: written descriptions are made at move time, for the photos you keep.
+        let described = options.describe ? try await describe(groupedNow.flatMap { $0 }, lookup, useModel: false) : [:]
         if !options.describe { board.skip(6, detail: "off") }
         board.setSummary(summary(groups: lookalikes.count, moving: groupedCount - lookalikes.count,
                                  problems: problems.count, documents: docPhotos.count))
@@ -87,7 +88,6 @@ struct Scanner {
                 })
             let raws = Picker.raws(members)
             for i in group.photos.indices {
-                group.photos[i].summary = described[group.photos[i].id]?.summary
                 group.photos[i].tags = described[group.photos[i].id]?.tags
                 // What the pick was based on, so your choices can be learned from.
                 group.photos[i].focus = raws[i].sharpness
@@ -273,13 +273,13 @@ struct Scanner {
             }
         }
         guard !pending.isEmpty else {
-            board.finish(6, detail: photos.isEmpty ? "nothing to describe" : "\(photos.count) photos, already described")
+            board.finish(6, detail: photos.isEmpty ? "nothing to tag" : "\(photos.count) photos, already tagged")
             return result
         }
         board.start(6, total: pending.count)
-        let fetch = fetchPolicy
         for (n, (photo, item)) in pending.enumerated() {
-            if let image = await item.image(maxSide: 768, fetch: fetch) {
+            // The preview on this Mac is plenty for scene tags.
+            if let image = await item.image(maxSide: 512, fetch: .localOnly) {
                 let described = Described(summary: useModel ? await Insight.describe(image) : nil,
                                           tags: await Insight.sceneTags(image))
                 result[photo.id] = described
@@ -287,7 +287,7 @@ struct Scanner {
             }
             board.advance(6, done: n + 1)
         }
-        board.finish(6, detail: useModel ? "\(pending.count) photos described" : "\(pending.count) photos tagged (no Apple Intelligence)")
+        board.finish(6, detail: "\(pending.count) photos tagged")
         return result
     }
 

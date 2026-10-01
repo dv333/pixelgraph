@@ -38,7 +38,7 @@ struct ScanOptions: ParsableArguments {
     @Flag(help: "Leave documents (receipts, forms, screenshots) among the other photos instead of sorting them for PGDocuments.")
     var noDocuments = false
 
-    @Flag(help: "Don't describe and tag the photos in groups.")
+    @Flag(help: "Don't tag scenes (beach, dog…) in the photos in groups.")
     var noDescribe = false
 
     @Flag(help: "Don't look for blurry, dark or smudged photos with no lookalike (the Junk tab).")
