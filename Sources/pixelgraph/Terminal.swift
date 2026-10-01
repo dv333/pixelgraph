@@ -8,7 +8,9 @@ import ImageIO
 final class Terminal: @unchecked Sendable {
     enum Key: Equatable {
         case left, right, up, down, escape, enter, backspace, quit, resize
-        case pageUp, pageDown, scrollUp, scrollDown, tab
+        case pageUp, pageDown, tab
+        /// Mouse wheel: positive is down, in wheel ticks.
+        case scroll(Int)
         case char(Character)
         /// 1-based screen position of a left click.
         case click(row: Int, col: Int)
@@ -70,8 +72,33 @@ final class Terminal: @unchecked Sendable {
         }
     }
 
-    /// Blocks until a key, click or window resize.
+    private var pending: Key?
+
+    /// Blocks until a key, click, wheel movement or window resize. Wheel
+    /// events that are already waiting are folded into one, so a trackpad
+    /// flick can't queue up scrolling that carries on after it stops.
     func nextKey() -> Key {
+        let key: Key
+        if let waiting = pending {
+            pending = nil
+            key = waiting
+        } else {
+            key = readKey()
+        }
+        guard case .scroll(var ticks) = key else { return key }
+        while wait(15) {
+            let next = readKey()
+            if case .scroll(let more) = next {
+                ticks += more
+            } else {
+                pending = next
+                break
+            }
+        }
+        return .scroll(ticks)
+    }
+
+    private func readKey() -> Key {
         while true {
             if size != lastSize {
                 lastSize = size
@@ -111,8 +138,8 @@ final class Terminal: @unchecked Sendable {
             guard final == UInt8(ascii: "M"), parts.count == 3 else { return nil }
             switch parts[0] {
             case 0: return .click(row: parts[2], col: parts[1])
-            case 64: return .scrollUp
-            case 65: return .scrollDown
+            case 64: return .scroll(-1)
+            case 65: return .scroll(1)
             default: return nil
             }
         }

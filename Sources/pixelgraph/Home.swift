@@ -44,6 +44,12 @@ final class App {
         draw()
         while true {
             let key = ui.term.nextKey()
+            if case .scroll(let ticks) = key {
+                guard prompt == nil, ticks != 0 else { continue }
+                move(ticks > 0 ? 1 : -1)
+                draw()
+                continue
+            }
             if prompt != nil {
                 if let source = editPrompt(key) { if try await scan(source) == .quit { return } }
             } else if let action = handle(key) {

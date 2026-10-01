@@ -63,6 +63,9 @@ final class ReviewSession {
         draw()
         while true {
             let key = ui.term.nextKey()
+            // The wheel only scrolls the groups; elsewhere it changes nothing,
+            // so don't redraw for it.
+            if case .scroll = key, screen != .groups || sheet != nil { continue }
             if let outcome = await handle(key) { return outcome }
             draw()
         }
@@ -107,8 +110,10 @@ final class ReviewSession {
             case .down: select(groupIndex + perRow)
             case .pageDown: select(groupIndex + page)
             case .pageUp: select(groupIndex - page)
-            case .scrollDown: scrollBy(1, perRow: perRow, page: page)
-            case .scrollUp: scrollBy(-1, perRow: perRow, page: page)
+            case .scroll(let ticks):
+                // About three wheel ticks a row, at most two rows a step.
+                let rows = ticks > 0 ? min(2, max(1, ticks / 3)) : max(-2, min(-1, ticks / 3))
+                scrollBy(rows, perRow: perRow, page: page)
             case .enter, .char(" "): open(groupIndex)
             case .char("k"): keepGroup(groupIndex)
             case .char("x"): moveGroupRest(groupIndex)
