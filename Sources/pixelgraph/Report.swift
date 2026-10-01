@@ -1,4 +1,5 @@
 import ArgumentParser
+import CryptoKit
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
@@ -28,14 +29,14 @@ enum Report {
             var next = 0
             func add() {
                 guard next < ids.count else { return }
-                let (index, id) = (next, ids[next])
+                let id = ids[next]
                 next += 1
                 tasks.addTask {
                     guard let item = items[id],
                           let thumb = await item.image(maxSide: thumbSide, fetch: .localOnly),
                           let full = await item.image(maxSide: fullSide, fetch: fetch)
                     else { return (id, nil) }
-                    return (id, save(thumb: thumb, full: full, as: "\(index)", in: folder))
+                    return (id, save(thumb: thumb, full: full, as: previewName(id), in: folder))
                 }
             }
             for _ in 0..<6 { add() }
@@ -59,6 +60,12 @@ enum Report {
         try? fm.removeItem(at: folder)
         try fm.createDirectory(at: folder.appendingPathComponent("img", isDirectory: true), withIntermediateDirectories: true)
         return folder
+    }
+
+    /// A file name that belongs to one photo, so a later scan never reuses
+    /// a name for a different photo.
+    static func previewName(_ id: String) -> String {
+        SHA256.hash(data: Data(id.utf8)).prefix(10).map { String(format: "%02x", $0) }.joined()
     }
 
     static func save(thumb: CGImage, full: CGImage, as name: String, in folder: URL) -> Images? {

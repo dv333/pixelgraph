@@ -249,7 +249,15 @@ enum Recents {
         guard let data = try? Data(contentsOf: file) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode([Entry].self, from: data)) ?? []
+        let entries = (try? decoder.decode([Entry].self, from: data)) ?? []
+        // One entry per place, even for entries saved before folder paths
+        // were spelled one way.
+        var seen = Set<Source>()
+        return entries.compactMap { entry in
+            var entry = entry
+            if case .folder(let path) = entry.source { entry.source = .folder(URL(fileURLWithPath: path)) }
+            return seen.insert(entry.source).inserted ? entry : nil
+        }
     }
 
     static func record(_ run: Run) {

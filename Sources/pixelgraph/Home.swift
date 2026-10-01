@@ -243,6 +243,9 @@ final class App {
     // MARK: - Scan
 
     private func scan(_ source: Source) async throws -> ReviewSession.Outcome {
+        // The scan and the review take over the screen, so the home screen
+        // must repaint fully when it comes back.
+        defer { drawnFrame = nil }
         if source.isPhotos && !photosAllowed {
             message = ui.red("PixelGraph needs access to Photos for that.")
             return .home
@@ -275,6 +278,7 @@ final class App {
             return .home
         }
         try? await Task.sleep(for: .milliseconds(700))
+        ui.forgetImages()
         let outcome = try await ReviewSession(run: run, ui: ui).show()
         screen = .home
         load()

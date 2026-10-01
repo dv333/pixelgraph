@@ -11,6 +11,14 @@ final class UI: @unchecked Sendable {
     private(set) var active = false
 
     private var images: [String: CGImage] = [:]
+
+    /// Drops every photo kept in memory; call after a scan rewrites the previews.
+    func forgetImages() {
+        images = [:]
+        blocks = [:]
+        jpegs = [:]
+        sizes = [:]
+    }
     private var blocks: [String: [String]] = [:]
     private var jpegs: [String: Data] = [:]
 
