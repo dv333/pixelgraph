@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import CoreLocation
 @preconcurrency import Photos
 import QuickLookThumbnailing
 
@@ -60,6 +61,8 @@ struct Item: @unchecked Sendable {
     let width: Int
     let height: Int
     let isScreenshot: Bool
+    /// Where it was taken, when known.
+    let location: Location?
 
     init(_ asset: PHAsset) {
         backing = .photo(asset)
@@ -69,6 +72,7 @@ struct Item: @unchecked Sendable {
         width = asset.pixelWidth
         height = asset.pixelHeight
         isScreenshot = asset.mediaSubtypes.contains(.photoScreenshot)
+        location = asset.location.map { Location(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude) }
     }
 
     /// nil for files that aren't images.
@@ -83,6 +87,7 @@ struct Item: @unchecked Sendable {
         // Files only in iCloud Drive: reading them would download them, so use
         // what the file system knows and let the thumbnail fill in later.
         if Files.isCloudOnly(url) {
+            location = nil
             date = values?.creationDate ?? modified
             width = 0
             height = 0
@@ -96,6 +101,7 @@ struct Item: @unchecked Sendable {
         width = w
         height = h
         date = Files.captureDate(props) ?? values?.creationDate ?? modified
+        location = Files.location(props)
     }
 
     static func fileID(_ url: URL) -> String { "file:" + url.standardizedFileURL.path }
@@ -210,6 +216,16 @@ enum Files {
                 && (other.deletingPathExtension().lastPathComponent == base.lastPathComponent
                     || other.lastPathComponent == url.lastPathComponent + ".xmp")
         }.filter { imageExtensions.contains($0.pathExtension.lowercased()) || sidecarExtensions.contains($0.pathExtension.lowercased()) }
+    }
+
+    /// The GPS position in a file's metadata.
+    static func location(_ props: [CFString: Any]) -> Location? {
+        guard let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any],
+              let lat = gps[kCGImagePropertyGPSLatitude] as? Double,
+              let lon = gps[kCGImagePropertyGPSLongitude] as? Double else { return nil }
+        let south = (gps[kCGImagePropertyGPSLatitudeRef] as? String) == "S"
+        let west = (gps[kCGImagePropertyGPSLongitudeRef] as? String) == "W"
+        return Location(latitude: south ? -lat : lat, longitude: west ? -lon : lon)
     }
 
     static func captureDate(_ props: [CFString: Any]) -> Date? {

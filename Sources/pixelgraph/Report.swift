@@ -21,7 +21,7 @@ enum Report {
 
         // Grid thumbnails come from the Mac's local previews; the large copies
         // may need iCloud, like the re-scoring step.
-        let ids = (run.groups + (run.documentGroups ?? [])).flatMap { $0.photos.map(\.id) }
+        let ids = run.allGroups.flatMap { $0.photos.map(\.id) }
         let fetch: Library.Fetch = offline ? .localOnly : .download(timeout: 60)
         var images: [String: Images] = [:]
         var done = 0

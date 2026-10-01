@@ -13,7 +13,7 @@ struct PixelGraph: AsyncParsableCommand {
             Nothing moves until you confirm, and every move can be undone.
             """,
         version: "0.2.0",
-        subcommands: [Home.self, Scan.self, Review.self, ReportCommand.self, Undo.self, Albums.self, DebugImages.self],
+        subcommands: [Home.self, Scan.self, Review.self, ReportCommand.self, Undo.self, Albums.self, Eval.self, DebugImages.self],
         defaultSubcommand: Home.self
     )
 }
@@ -23,7 +23,7 @@ struct ScanOptions: ParsableArguments {
     @Option(help: "Max fingerprint distance for shots taken close together.")
     var momentThreshold: Float = 0.5
 
-    @Option(help: "Seconds apart that still count as the same moment.")
+    @Option(help: "Seconds over which the moment threshold eases to the scene threshold.")
     var momentWindow: Double = 600
 
     @Option(help: "Max fingerprint distance for shots any time apart (copies, same scene).")
@@ -41,10 +41,13 @@ struct ScanOptions: ParsableArguments {
     @Flag(help: "Don't describe and tag the photos in groups.")
     var noDescribe = false
 
+    @Flag(help: "Don't look for blurry, dark or smudged photos with no lookalike (the Junk tab).")
+    var noJunk = false
+
     var scanner: Scanner.Options {
         Scanner.Options(
             rules: GroupingRules(momentThreshold: momentThreshold, momentWindow: momentWindow, sceneThreshold: sceneThreshold),
-            useModel: !noModel, offline: offline, documents: !noDocuments, describe: !noDescribe)
+            useModel: !noModel, offline: offline, documents: !noDocuments, describe: !noDescribe, junk: !noJunk)
     }
 }
 
@@ -208,9 +211,9 @@ extension Run {
         }
         mark(&groups)
         if documentGroups != nil { mark(&documentGroups!) }
+        if junkGroups != nil { mark(&junkGroups!) }
     }
 
-    /// Reverses `markMoved` after an undo.
     /// Marks kept photos as having had a caption written, or not.
     mutating func markCaptioned(_ ids: [String], _ captioned: Bool = true) {
         let set = Set(ids)
@@ -223,12 +226,15 @@ extension Run {
         }
         mark(&groups)
         if documentGroups != nil { mark(&documentGroups!) }
+        if junkGroups != nil { mark(&junkGroups!) }
     }
 
+    /// Reverses `markMoved` after an undo.
     mutating func unmark(_ ids: [String]) {
         let set = Set(ids)
         for g in groups.indices { groups[g].pick.moved.removeAll { set.contains($0) } }
         for g in (documentGroups ?? []).indices { documentGroups![g].pick.moved.removeAll { set.contains($0) } }
+        for g in (junkGroups ?? []).indices { junkGroups![g].pick.moved.removeAll { set.contains($0) } }
     }
 
 }
@@ -264,7 +270,8 @@ extension Photo {
     func with(_ scores: Analysis) -> Photo {
         var analysis = scores
         analysis.vector = self.analysis.vector
-        return Photo(id: id, date: date, isScreenshot: isScreenshot, width: width, height: height, analysis: analysis)
+        return Photo(id: id, date: date, isScreenshot: isScreenshot, width: width, height: height, analysis: analysis,
+                     quality: quality, location: location)
     }
 }
 

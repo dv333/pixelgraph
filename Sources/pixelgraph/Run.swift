@@ -13,10 +13,16 @@ struct Run: Codable {
     /// Documents found in the scan (Sort documents), each in a group of
     /// copies with the same text; nil when documents weren't sorted.
     var documentGroups: [Group]?
+    /// Photos with no lookalike that look like rejects on their own (blurry,
+    /// nearly black, blown out, smudged), all selected to move; nil when not looked for.
+    var junkGroups: [Group]?
+
+    /// Every group on every tab.
+    var allGroups: [Group] { groups + (documentGroups ?? []) + (junkGroups ?? []) }
 
     struct Group: Codable {
         enum Kind: String, Codable {
-            case copies, moment, scene, screenshots, documents
+            case copies, moment, scene, screenshots, documents, junk
 
             var title: String {
                 switch self {
@@ -25,6 +31,7 @@ struct Run: Codable {
                 case .scene: "Same scene"
                 case .screenshots: "Screenshots"
                 case .documents: "Documents"
+                case .junk: "Junk"
                 }
             }
         }
@@ -59,6 +66,10 @@ struct Run: Codable {
         var sameText: Double?
         /// A caption, title and keywords were written to it when kept.
         var captioned: Bool?
+        /// The sharpness and exposure (0 … 1) the pick compared, for learning
+        /// from your choices. Nil in older scans.
+        var focus: Float?
+        var exposure: Float?
     }
 
     /// Best first, then kept photos, then the ones moving, moved last.
@@ -111,6 +122,8 @@ extension Run.Group.Kind {
         // edits 0.08–0.21. Re-imported copies keep the original capture time.
         if photos.allSatisfy(\.isScreenshot) { self = .screenshots }
         else if farthest < 0.06 || (farthest < 0.25 && span < 2) { self = .copies }
+        else if photos.indices.allSatisfy({ i in photos.indices.allSatisfy { j in
+            i == j || GroupingRules.isCopy(photos[i], photos[j], distance: Grouper.distance(photos[i], photos[j])) } }) { self = .copies }
         else if span <= rules.momentWindow { self = .moment }
         else { self = .scene }
     }

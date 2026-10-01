@@ -36,6 +36,7 @@ pixelgraph scan --folder /Volumes/T7/DCIM    # a folder, drive or iCloud Drive f
 pixelgraph review                            # pick up where you left off
 pixelgraph report                            # the last scan as a web page
 pixelgraph undo                              # put back the last move
+pixelgraph eval                              # how PixelGraph did against your reviews
 ```
 
 ### Reviewing
@@ -56,6 +57,7 @@ One key means one thing on every screen, and keys set a state rather than toggli
 | R | say why it's moving |
 | C | compare two photos side by side: ← → change the candidate, ↑ pins it |
 | M | move the selection to PGDuplicates, or D in the sheet to delete it — always asks first |
+| Tab | switch between Duplicates, Documents and Junk |
 | U | undo the last change or move |
 | ? | all the keys |
 | Q | quit — everything is saved as you go |
@@ -80,6 +82,16 @@ When you press M, PixelGraph asks what to do with the copies: **Enter** moves th
 - **Folders and drives, delete:** to the Trash, with their RAW and sidecar files; undo puts them back.
 
 Moves made before the rename went to "PixelGraph Duplicates"; that album or folder is left as it is, and undo still finds them.
+
+### How it decides
+
+**Grouping.** Every photo gets a Vision fingerprint, a tiny copy hash and quality measures from the preview already on your Mac. Two photos can group when their fingerprints are close. How close is allowed eases smoothly from loose (shots seconds apart) to strict (shots days apart) instead of jumping at a cutoff, and is tightened when the number of people differs. Copies and re-saves match by hash anywhere, any time. Photos taken more than 2 km apart never group unless they're copies. Close calls between photos taken apart in time are lined up with Vision's image registration and kept apart if the pixels don't match. Groups form by average linkage, so a burst that pans stays together without a chain of different shots drifting into one group.
+
+**Best shot and rejects.** Sharpness is measured where it matters: on the faces, or on the sharpest part of the frame net of noise, so a portrait with a soft background isn't called blurry and a noisy night shot isn't called sharp. Exposure counts crushed shadows and blown highlights. Rejects are judged against the other shots in the group: eyes shut when the same person has them open in another frame, a head turned away, the subject much softer than in the sharpest shot (motion blur or missed focus), poor exposure, a smudged lens. Apple Intelligence, when available, still checks faces and breaks close calls.
+
+**Junk.** Photos with no lookalike that are nearly black, blown out, shot through a smudged lens, or among the blurriest 5% of the scan and poorly rated by Vision go on a third tab, Junk, all selected to move. `--no-junk` turns it off.
+
+**Learning from you.** Every group you open in review is remembered (`decisions.json` in PixelGraph's data folder). After 10 reviewed groups, the weights behind the best-shot pick shift toward the shots you choose. `pixelgraph eval` shows how often PixelGraph's pick was your ★, how often its reject flags were right, and how many groups you kept whole.
 
 ### Descriptions for the photos you keep
 

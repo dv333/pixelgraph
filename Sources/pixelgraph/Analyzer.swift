@@ -22,6 +22,8 @@ struct Analysis: Sendable {
     /// Long side of the image this was measured on. Small means Photos only
     /// had a local preview (original in iCloud), so sharpness is rougher.
     var previewSide: Int
+    /// Each face in detail (grouped photos only); kept in the index's extras.
+    var faces: [FaceDetail] = []
 }
 
 enum Analyzer {
@@ -39,6 +41,8 @@ enum Analyzer {
         )
         let vector = fingerprint ? floats(from: try await handler.perform(GenerateImageFeaturePrintRequest())) : []
         let qualities = faces.compactMap { $0.captureQuality?.score }
+        let details = eyes && !faces.isEmpty ? try await faceDetails(image, handler: handler) : []
+        let open = details.map(\.eyes).filter { $0 >= 0 }
         return Analysis(
             vector: vector,
             aesthetic: aesthetics.overallScore,
@@ -46,27 +50,45 @@ enum Analyzer {
             sharpness: sharpness(of: image),
             faceCount: faces.count,
             faceQuality: qualities.min() ?? -1,
-            eyesOpen: eyes && !faces.isEmpty ? try await eyeOpenness(image, handler: handler) : -1,
-            previewSide: max(image.width, image.height)
+            eyesOpen: open.min() ?? -1,
+            previewSide: max(image.width, image.height),
+            faces: details
         )
     }
 
-    private static func eyeOpenness(_ image: CGImage, handler: ImageRequestHandler) async throws -> Float {
+    /// Where each face is, how open its eyes are, which way it's turned and
+    /// how sharp it is, so photos in a group can be compared face by face.
+    private static func faceDetails(_ image: CGImage, handler: ImageRequestHandler) async throws -> [FaceDetail] {
         let size = CGSize(width: image.width, height: image.height)
-        var lowest: Float = -1
+        let gray = Gray(image, maxSide: CGFloat(max(image.width, image.height)))
+        var details: [FaceDetail] = []
         for face in try await handler.perform(DetectFaceLandmarksRequest()) {
-            guard let landmarks = face.landmarks else { continue }
-            for eye in [landmarks.leftEye, landmarks.rightEye] {
-                let points = eye.pointsInImageCoordinates(size)
-                guard points.count >= 4 else { continue }
-                let xs = points.map(\.x), ys = points.map(\.y)
-                let width = xs.max()! - xs.min()!
-                guard width > 0 else { continue }
-                let ratio = Float((ys.max()! - ys.min()!) / width)
-                lowest = lowest < 0 ? ratio : min(lowest, ratio)
+            var lowest: Float = -1
+            if let landmarks = face.landmarks {
+                for eye in [landmarks.leftEye, landmarks.rightEye] {
+                    let points = eye.pointsInImageCoordinates(size)
+                    guard points.count >= 4 else { continue }
+                    let xs = points.map(\.x), ys = points.map(\.y)
+                    let width = xs.max()! - xs.min()!
+                    guard width > 0 else { continue }
+                    let ratio = Float((ys.max()! - ys.min()!) / width)
+                    lowest = lowest < 0 ? ratio : min(lowest, ratio)
+                }
             }
+            // Vision's box has a bottom-left origin; flip it to top-left.
+            let box = face.boundingBox.cgRect
+            let top = 1 - box.origin.y - box.height
+            var sharp: Float = 0
+            if let gray {
+                sharp = gray.sharpness(in: (Int(box.origin.x * CGFloat(gray.width)), Int(top * CGFloat(gray.height)),
+                                            Int(box.width * CGFloat(gray.width)), Int(box.height * CGFloat(gray.height))))
+            }
+            details.append(FaceDetail(
+                x: Float(box.midX), y: Float(top + box.height / 2), width: Float(box.width), height: Float(box.height),
+                eyes: lowest, yaw: Float(face.yaw.converted(to: .degrees).value),
+                pitch: Float(face.pitch.converted(to: .degrees).value), sharpness: sharp))
         }
-        return lowest
+        return details
     }
 
     private static func floats(from print: FeaturePrintObservation) -> [Float] {

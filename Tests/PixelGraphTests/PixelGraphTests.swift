@@ -47,7 +47,7 @@ private func ids(_ groups: [[Int]], _ photos: [Photo]) -> Set<Set<String>> {
 
 @Test func sharperShotWinsWhenLookIsEqual() async {
     let group = [photo("soft", 0, sharpness: 0.001), photo("crisp", 0.2, at: 2, sharpness: 0.02)]
-    let pick = await Picker.pick(group, useModel: false)
+    let pick = await Picker.pick(group, useModel: false, weights: .standard)
     #expect(pick.best == "crisp")
     #expect(pick.decidedBy == "vision")
     #expect(pick.notes["soft"] == "blurrier")
@@ -71,7 +71,7 @@ private func ids(_ groups: [[Int]], _ photos: [Photo]) -> Set<Set<String>> {
 @Test func flaggedPhotoIsNotPickedWhenThereIsAnAlternative() async {
     // The sharper shot has its eyes closed, so the softer one wins.
     let group = [photo("closed", 0, sharpness: 0.02), photo("open", 0.2, at: 2, sharpness: 0.005)]
-    let pick = await Picker.pick(group, useModel: false, problems: ["closed": "eyes closed"])
+    let pick = await Picker.pick(group, useModel: false, problems: ["closed": "eyes closed"], weights: .standard)
     #expect(pick.best == "open")
     #expect(pick.keepers == ["open"])
     #expect(pick.suggestions == ["closed": "eyes closed"])
@@ -87,7 +87,7 @@ private func ids(_ groups: [[Int]], _ photos: [Photo]) -> Set<Set<String>> {
 
 @Test func everythingButTheBestStartsSelectedToMove() async {
     let group = [photo("A", 0, sharpness: 0.02), photo("B", 0.1, at: 1), photo("C", 0.2, at: 2)]
-    let pick = await Picker.pick(group, useModel: false)
+    let pick = await Picker.pick(group, useModel: false, weights: .standard)
     #expect(pick.best == "A")
     #expect(!pick.willMove("A"))
     #expect(pick.willMove("B") && pick.willMove("C"))
@@ -283,4 +283,125 @@ struct MoveTests {
 
     try await Captions.restore([change!])
     #expect(Captions.read(url) == Captions.Fields())
+}
+
+// MARK: - Detection
+
+private func quality(hash: UInt64 = 0, focus: Float = 0.01, motion: Float = 0, luma: Float = 0.5,
+                     dark: Float = 0, bright: Float = 0, smudge: Float = 0) -> Quality {
+    Quality(hash: hash, focus: focus, noise: 0, motion: motion, luma: luma, dark: dark, bright: bright, smudge: smudge)
+}
+
+private func face(x: Float = 0.5, eyes: Float = 0.3, yaw: Float = 0, sharpness: Float = 0.01) -> FaceDetail {
+    FaceDetail(x: x, y: 0.4, width: 0.2, height: 0.2, eyes: eyes, yaw: yaw, pitch: 0, sharpness: sharpness)
+}
+
+private func withFaces(_ p: Photo, _ faces: [FaceDetail]) -> Photo {
+    var a = p.analysis
+    a.faces = faces
+    a.faceCount = faces.count
+    a.faceQuality = 0.5
+    return Photo(id: p.id, date: p.date, isScreenshot: p.isScreenshot, width: p.width, height: p.height, analysis: a,
+                 quality: p.quality, location: p.location)
+}
+
+@Test func thresholdEasesWithTimeInsteadOfJumping() {
+    let a = photo("A", 0)
+    let at = { (s: Double) in rules.threshold(a, photo("B", 0, at: s)) }
+    #expect(abs(at(0) - 0.5) < 0.001)
+    #expect(at(60) > at(300) && at(300) > at(599) && at(599) > at(601) - 0.001)
+    #expect(abs(at(86_400) - 0.3) < 0.001)
+}
+
+@Test func copiesFoundByHashAcrossTimeAndPlace() {
+    var a = photo("A", 0), b = photo("B", 0.09, at: 86_400 * 30)
+    a.quality = quality(hash: 0xF0F0_F0F0_F0F0_F0F0)
+    b.quality = quality(hash: 0xF0F0_F0F0_F0F0_F0F1)
+    a.location = Location(latitude: 37.77, longitude: -122.42)
+    b.location = Location(latitude: 48.85, longitude: 2.35)
+    #expect(Grouper.groups([a, b], rules: rules).count == 1)
+    #expect(Run.Group.Kind([a, b], rules: rules) == .copies)
+}
+
+@Test func sameLookFarApartIsNotTheSameShot() {
+    var a = photo("A", 0), b = photo("B", 0.2, at: 30)
+    a.location = Location(latitude: 37.77, longitude: -122.42)
+    b.location = Location(latitude: 37.90, longitude: -122.42)
+    #expect(Grouper.groups([a, b], rules: rules).isEmpty)
+}
+
+@Test func closeCallsApartInTimeAreMarkedForChecking() {
+    let photos = [photo("A", 0), photo("B", 0.25, at: 86_400), photo("C", 0.2, at: 86_400 + 5)]
+    let edges = Grouper.edges(photos, rules: rules)
+    #expect(edges.first { Grouper.Pair($0.i, $0.j) == Grouper.Pair(0, 1) }?.needsCheck == true)
+    #expect(edges.first { Grouper.Pair($0.i, $0.j) == Grouper.Pair(1, 2) }?.needsCheck == false)
+    // A check that fails keeps the pair apart.
+    let groups = Grouper.cluster(photos, edges: edges, rules: rules, rejected: [Grouper.Pair(0, 1), Grouper.Pair(0, 2)])
+    #expect(ids(groups, photos) == [["B", "C"]])
+}
+
+@Test func eyesClosedIsJudgedAgainstTheSamePersonsOtherShots() {
+    // Narrow eyes for this person: 0.18 is open for them, 0.05 is a blink.
+    let open = withFaces(photo("open", 0), [face(eyes: 0.18)])
+    let blink = withFaces(photo("blink", 0.1, at: 1), [face(eyes: 0.05)])
+    let turned = withFaces(photo("turned", 0.1, at: 2), [face(eyes: 0.18, yaw: 45)])
+    let problems = Inspector.compare([open, blink, turned])
+    #expect(problems["blink"] == "eyes closed")
+    #expect(problems["turned"] == "looking away")
+    #expect(problems["open"] == nil)
+}
+
+@Test func softSubjectIsFlaggedAgainstTheSharpestShot() {
+    var crisp = photo("crisp", 0), shaken = photo("shaken", 0.1, at: 1)
+    crisp.quality = quality(focus: 0.02)
+    shaken.quality = quality(focus: 0.002, motion: 0.8)
+    #expect(Inspector.compare([crisp, shaken]) == ["shaken": "motion blur"])
+}
+
+@Test func junkIsBlackBlownSmudgedOrAmongTheBlurriest() {
+    var all = (0..<40).map { i -> Photo in
+        var p = photo("p\(i)", Float(i), at: Double(i))
+        p.quality = quality(focus: 0.01 + Float(i) * 0.001)
+        return p
+    }
+    var black = photo("black", 0), soft = photo("soft", 0, aesthetic: -0.5)
+    black.quality = quality(luma: 0.02, dark: 0.9)
+    soft.quality = quality(focus: 0.0001)
+    all += [black, soft]
+    let found = Inspector.rejects([black, soft, all[20]], among: all)
+    #expect(found == ["black": "bad exposure", "soft": "blurry"])
+}
+
+@Test func learnerLeansTowardWhatYouChoose() {
+    // You always pick the sharper shot even when it looks worse.
+    let diffs = Array(repeating: [-0.2, 0.6, 0, 0, 0], count: 30)
+    let learned = Learner.fit(diffs)
+    #expect(learned.sharpness > Picker.Weights.standard.sharpness)
+    #expect(learned.aesthetic < Picker.Weights.standard.aesthetic)
+}
+
+@Test func qualityTellsSharpFromBlurredAndDarkFromBright() throws {
+    func image(_ draw: (CGContext) -> Void) throws -> CGImage {
+        let context = try #require(CGContext(data: nil, width: 256, height: 256, bitsPerComponent: 8, bytesPerRow: 0,
+                                             space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue))
+        draw(context)
+        return try #require(context.makeImage())
+    }
+    let checks = try image { c in
+        for y in stride(from: 0, to: 256, by: 8) {
+            for x in stride(from: 0, to: 256, by: 8) {
+                c.setFillColor(gray: (x / 8 + y / 8) % 2 == 0 ? 0.1 : 0.9, alpha: 1)
+                c.fill(CGRect(x: x, y: y, width: 8, height: 8))
+            }
+        }
+    }
+    let flat = try image { c in
+        c.setFillColor(gray: 0.02, alpha: 1)
+        c.fill(CGRect(x: 0, y: 0, width: 256, height: 256))
+    }
+    let sharp = try #require(Gray(checks, maxSide: 256)), dark = try #require(Gray(flat, maxSide: 256))
+    #expect(sharp.peakFocus() > dark.peakFocus())
+    #expect(dark.exposure().dark > 0.9)
+    #expect(Verifier.correlation(sharp, sharp, 0, 0) > 0.99)
+    #expect(Quality.distance(Quality.hash(checks), Quality.hash(checks)) == 0)
 }

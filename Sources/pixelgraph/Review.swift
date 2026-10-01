@@ -45,16 +45,36 @@ final class ReviewSession {
     }
 
     private var source: Source { run.source ?? .dates(from: nil, to: nil) }
-    private enum Tab { case duplicates, documents }
+    private enum Tab { case duplicates, documents, junk }
     private var tab = Tab.duplicates
 
-    /// The groups on the current tab: lookalikes, or documents.
+    /// The groups on the current tab: lookalikes, documents, or junk.
     private var groups: [Run.Group] {
-        get { tab == .duplicates ? run.groups : run.documentGroups ?? [] }
-        set { if tab == .duplicates { run.groups = newValue } else { run.documentGroups = newValue } }
+        get {
+            switch tab {
+            case .duplicates: run.groups
+            case .documents: run.documentGroups ?? []
+            case .junk: run.junkGroups ?? []
+            }
+        }
+        set {
+            switch tab {
+            case .duplicates: run.groups = newValue
+            case .documents: run.documentGroups = newValue
+            case .junk: run.junkGroups = newValue
+            }
+        }
     }
 
     private var hasDocuments: Bool { !(run.documentGroups ?? []).isEmpty }
+    private var hasJunk: Bool { !(run.junkGroups ?? []).isEmpty }
+    /// The tabs this scan has, in the order tab goes through them.
+    private var tabs: [Tab] {
+        var tabs: [Tab] = [.duplicates]
+        if hasDocuments { tabs.append(.documents) }
+        if hasJunk { tabs.append(.junk) }
+        return tabs
+    }
 
     private var group: Run.Group { groups[groupIndex] }
     private var pick: Pick { group.pick }
@@ -86,6 +106,7 @@ final class ReviewSession {
         guard dirty else { return }
         try? run.save(to: runFile)
         try? Report.render(run, images: images, in: folder)
+        Decisions.record(run)
         dirty = false
     }
 
@@ -131,8 +152,8 @@ final class ReviewSession {
             case .char("v"): overview = overview == .mosaic ? .filmstrip : .mosaic; scroll = 0
             case .char("m"): askToMove(everything: true)
             case .tab:
-                guard hasDocuments else { toast = ui.dim("No documents in this scan."); break }
-                tab = tab == .duplicates ? .documents : .duplicates
+                guard tabs.count > 1 else { toast = ui.dim("No documents or junk in this scan."); break }
+                tab = tabs[((tabs.firstIndex(of: tab) ?? 0) + 1) % tabs.count]
                 groupIndex = 0
                 scroll = 0
                 needsFull = true
@@ -505,7 +526,11 @@ final class ReviewSession {
     private func undo() async {
         if case .mark(let markTab, let g, let before)? = history.last {
             history.removeLast()
-            if markTab == .duplicates { run.groups[g].pick = before } else { run.documentGroups?[g].pick = before }
+            switch markTab {
+            case .duplicates: run.groups[g].pick = before
+            case .documents: run.documentGroups?[g].pick = before
+            case .junk: run.junkGroups?[g].pick = before
+            }
             dirty = true
             needsFull = true
             toast = ui.green("✓") + " Undone"
@@ -634,8 +659,9 @@ final class ReviewSession {
                 return ui.actionBar(hints: "space open · tab duplicates · m file · u undo · ? keys",
                                     short: "space open · tab · m file", action: fileButton(run.documentsToFile.count, copies: run.documentCopies.count))
             }
-            return ui.actionBar(hints: "space open · k keep group · x move rest · m move · u undo" + (hasDocuments ? " · tab documents" : "") + " · ? keys",
-                                short: "space open · ? keys", action: moveButton(run.toMove.count))
+            let selected = groups.reduce(0) { n, g in n + g.photos.filter { g.pick.willMove($0.id) }.count }
+            return ui.actionBar(hints: "space open · k keep group · x move rest · m move · u undo" + (tabs.count > 1 ? " · tab next tab" : "") + " · ? keys",
+                                short: "space open · ? keys", action: moveButton(selected))
         default:
             let moving = group.photos.map(\.id).filter { pick.willMove($0) }.count
             if tab == .documents {
@@ -662,13 +688,18 @@ final class ReviewSession {
     private func overviewHeader(range: String = "") -> String {
         let photos = groups.reduce(0) { $0 + $1.photos.count }
         let reviewed = groups.filter { $0.reviewed == true }.count
-        var left = ui.bold(run.scope) + ui.dim(" · \(groups.count) \(tab == .duplicates ? "groups" : "documents") · \(photos) photos")
-        if hasDocuments {
-            let docs = (run.documentGroups ?? []).reduce(0) { $0 + $1.photos.count }
+        let noun = tab == .documents ? "documents" : "groups"
+        var left = ui.bold(run.scope) + ui.dim(" · \(groups.count) \(noun) · \(photos) photos")
+        if tabs.count > 1 {
             let on = { [ui] (text: String) in ui.bold("[" + text + "]") }
-            let duplicatesLabel = "Duplicates \(run.groups.count)", documentsLabel = "Documents \(docs)"
-            left = (tab == .duplicates ? on(duplicatesLabel) : ui.dim(duplicatesLabel)) + "  "
-                + (tab == .documents ? on(documentsLabel) : ui.dim(documentsLabel)) + ui.dim("  tab · ") + left
+            func label(_ t: Tab) -> String {
+                switch t {
+                case .duplicates: "Duplicates \(run.groups.count)"
+                case .documents: "Documents \((run.documentGroups ?? []).reduce(0) { $0 + $1.photos.count })"
+                case .junk: "Junk \((run.junkGroups ?? []).reduce(0) { $0 + $1.photos.count })"
+                }
+            }
+            left = tabs.map { $0 == tab ? on(label($0)) : ui.dim(label($0)) }.joined(separator: "  ") + ui.dim("  tab · ") + left
         }
         return ui.at(1, 2) + ui.spread(left, ui.dim(range + "\(reviewed) reviewed"), width: ui.cols - 2)
     }
@@ -678,6 +709,10 @@ final class ReviewSession {
         if g.kind == .documents {
             let best = g.photos.first { $0.id == g.pick.best } ?? g.photos[0]
             let title = best.document ?? "Document"
+            return (selected ? ui.bold(title) : title) + (g.reviewed == true ? " " + ui.green("✓") : "")
+        }
+        if g.kind == .junk {
+            let title = (g.pick.suggestions.values.first ?? "junk").capitalizedFirst + " · " + Format.day.string(from: g.photos[0].date)
             return (selected ? ui.bold(title) : title) + (g.reviewed == true ? " " + ui.green("✓") : "")
         }
         var title = Format.day.string(from: g.photos[0].date)
@@ -1145,7 +1180,7 @@ final class ReviewSession {
             row("r", "say why it's moving"),
             row("c", "compare two photos side by side"),
             row("d", "documents tab: file this copy in PGDocuments"),
-            row("tab", "switch between Duplicates and Documents"),
+            row("tab", "switch between Duplicates, Documents and Junk"),
             "",
             row("m", "move the selection to PGDuplicates or delete it (asks first)"),
             row("u", "undo the last change or move"),
