@@ -75,6 +75,8 @@ One key means one thing on every screen, and keys set a state rather than toggli
 
 In iTerm2, WezTerm, kitty and Ghostty photos are shown as real images; other true-colour terminals get colour-block previews. Photos selected to move are shown muted, not darkened, so they're still easy to judge. Clicking a sheet's button does what it says; clicking outside a sheet closes it.
 
+
+**Editing.** `e` opens the highlighted photo in Photos' editor (after `a`, every photo in the group goes into a "PG Edit" album in Photos: Return edits, → goes to the next). Photos from folders and drives open in Preview. When you come back, the previews show your edit. Opening straight into Edit presses Return in Photos for you, which needs your terminal allowed in System Settings → Privacy & Security → Accessibility; without it the photo is just shown and you press Return. Edits in Photos can always be undone with Image → Revert to Original.
 ### Documents
 
 Receipts, bills, forms, letters, IDs, tickets, notes, whiteboards, screenshots and photos of screens are sorted onto their own **Documents** tab (press Tab on the groups screen). Each is named — "Pier 39 Café receipt", "Form · I-797C notice" — from its text, read on your Mac. Copies of a document are matched by **what they say**, not just how they look, so two forms from the same template with different names are never treated as duplicates. The best copy is filed in **PGDocuments**; extra copies go to Duplicates. On that tab, `d` files a copy, `k` keeps it where it is, `x` marks it as a copy.

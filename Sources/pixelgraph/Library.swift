@@ -129,7 +129,9 @@ enum Library {
     /// What the Duplicates album was called before; moves made then went there.
     static let oldDuplicatesAlbum = "PixelGraph Duplicates"
     /// Albums PixelGraph makes, left out of the albums you can scan.
-    static let ownAlbums: Set<String> = [duplicatesAlbum, documentsAlbum, junkAlbum, oldDuplicatesAlbum]
+    /// Where photos picked for editing wait in Photos; emptied each time.
+    static let editAlbum = "PG Edit"
+    static let ownAlbums: Set<String> = [duplicatesAlbum, documentsAlbum, junkAlbum, oldDuplicatesAlbum, editAlbum]
 
     /// Adds photos to the album called `destination` (creating it if needed)
     /// and takes them out of `album`. Nothing leaves the library. Returns
@@ -149,6 +151,19 @@ enum Library {
             }
         }
         return removable
+    }
+
+    /// Puts exactly these photos in the "PG Edit" album, making it if needed.
+    static func fillEditAlbum(_ ids: [String]) async throws {
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        let existing = album(named: editAlbum)
+        let old = existing.map { PHAsset.fetchAssets(in: $0, options: nil) }
+        try await PHPhotoLibrary.shared().performChanges {
+            let request = existing.flatMap { PHAssetCollectionChangeRequest(for: $0) }
+                ?? PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: editAlbum)
+            if let old, old.count > 0 { request.removeAssets(old) }
+            request.addAssets(assets)
+        }
     }
 
     /// The ids of the photos in an album.

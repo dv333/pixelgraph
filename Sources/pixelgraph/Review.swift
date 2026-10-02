@@ -154,6 +154,7 @@ final class ReviewSession {
     private func handle(_ key: Terminal.Key) async -> Outcome? {
         if key == .resize { return nil }
         if Date.now.timeIntervalSince(toastSince) > 4 { toast = nil }
+        await refreshEdited()
 
         // Leaving always asks first: a stray Esc or q shouldn't end a long review.
         if case .leave(let outcome)? = sheet {
@@ -261,6 +262,9 @@ final class ReviewSession {
                     moveAll()
                     askToMove(everything: false)
                     return nil
+                case .char("e"):
+                    await editPhotos(order.map(\.id))
+                    return nil
                 case .escape, .backspace, .char("a"):
                     toast = ui.dim("Selection cleared")
                     return nil
@@ -294,6 +298,7 @@ final class ReviewSession {
                 cursor = min(max(0, cursor + (key == .pageDown ? page : -page)), order.count - 1)
             case .char("c"): openCompare()
             case .char("o"): reveal(order[cursor].id)
+            case .char("e"): await editPhotos([order[cursor].id])
             case .char("k"): keep(order[cursor].id)
             case .char("x"): markMove(order[cursor].id)
             case .char("b"): makeBest(order[cursor].id)
@@ -320,6 +325,7 @@ final class ReviewSession {
             case .char("z"): toggleZoom([order[cursor]])
             case .char("c"): openCompare()
             case .char("o"): reveal(order[cursor].id)
+            case .char("e"): await editPhotos([order[cursor].id])
             case .char("k"): keep(order[cursor].id)
             case .char("x"): markMove(order[cursor].id)
             case .char("b"): makeBest(order[cursor].id)
@@ -337,6 +343,7 @@ final class ReviewSession {
             case .up, .tab: swap(&pinned, &cursor)
             case .char("z"): toggleZoom([order[pinned], order[cursor]])
             case .char("o"): reveal(order[cursor].id)
+            case .char("e"): await editPhotos([order[cursor].id])
             case .char("k"): keep(order[cursor].id)
             case .char("x"): markMove(order[cursor].id)
             case .char("b"): makeBest(order[cursor].id)
@@ -516,6 +523,82 @@ final class ReviewSession {
                  "-e", "spotlight media item id (item 1 of argv)", "-e", "end tell", "-e", "end run", id])
             toast = ui.green("✓") + " Shown in Photos"
         }
+    }
+
+    // MARK: - Edit in Photos
+
+    /// Photos sent off to be edited, with when each was last changed, so
+    /// their previews are made again once the edit is saved.
+    private var editing: [String: Date] = [:]
+    private var lastEditCheck = Date.distantPast
+
+    /// e: library photos open in Photos' editor (one straight into Edit;
+    /// several in the "PG Edit" album); files open in Preview.
+    private func editPhotos(_ ids: [String]) async {
+        let items = Items.lookup(ids)
+        for id in ids { if let item = items[id] { editing[id] = item.modified } }
+        let files = ids.filter { $0.hasPrefix("file:") }.compactMap { id -> String? in
+            var path = String(id.dropFirst(5))
+            if !FileManager.default.fileExists(atPath: path),
+               let moved = Mover.history().reversed().lazy.flatMap(\.files).first(where: { $0.from == path }) {
+                path = moved.to
+            }
+            return FileManager.default.fileExists(atPath: path) ? path : nil
+        }
+        let library = ids.filter { !$0.hasPrefix("file:") }
+        var said: [String] = []
+        if !files.isEmpty {
+            launch(["/usr/bin/open", "-a", "Preview"] + files)
+            said.append("\(files.count == 1 ? "Opened" : "Opened \(files.count)") in Preview")
+        }
+        if library.count == 1, let id = library.first {
+            // Show it, then Return, which is Edit in Photos. Pressing a key
+            // needs Accessibility permission; without it the photo is just shown.
+            launch(["/usr/bin/osascript", "-e", "on run argv",
+                    "-e", "tell application \"Photos\"", "-e", "activate",
+                    "-e", "spotlight media item id (item 1 of argv)", "-e", "end tell",
+                    "-e", "delay 1.2",
+                    "-e", "try", "-e", "tell application \"System Events\" to keystroke return", "-e", "end try",
+                    "-e", "end run", id])
+            said.append("Opened in Photos' editor (only shown? press Return there)")
+        } else if library.count > 1 {
+            do {
+                try await Library.fillEditAlbum(library)
+                launch(["/usr/bin/osascript", "-e", "tell application \"Photos\"", "-e", "activate",
+                        "-e", "spotlight (first album whose name is \"\(Library.editAlbum)\")", "-e", "end tell"])
+                said.append("\(library.count) in the “\(Library.editAlbum)” album in Photos: Return edits, → next")
+            } catch {
+                toast = ui.red("Couldn't open them in Photos: \(error.localizedDescription)")
+                return
+            }
+        }
+        guard !said.isEmpty else {
+            toast = ui.dim("Can't find that photo any more")
+            return
+        }
+        toast = ui.green("✓") + " " + said.joined(separator: " · ") + ui.dim(" · previews update when you're back")
+    }
+
+    /// Makes new previews for photos edited since e sent them off, at most
+    /// every couple of seconds, so the review shows the edit.
+    private func refreshEdited() async {
+        guard !editing.isEmpty, Date.now.timeIntervalSince(lastEditCheck) > 2 else { return }
+        lastEditCheck = .now
+        let items = Items.lookup(Array(editing.keys))
+        var updated = 0
+        for (id, before) in editing {
+            guard let item = items[id], item.modified > before, images[id] != nil,
+                  let thumb = await item.image(maxSide: Report.thumbSide, fetch: .localOnly),
+                  let full = await item.image(maxSide: Report.fullSide, fetch: .download(timeout: 30)) else { continue }
+            // Same file names as before, so the review picks them up as they are.
+            _ = Report.save(thumb: thumb, full: full, as: Report.previewName(id), in: folder)
+            editing[id] = item.modified
+            updated += 1
+        }
+        guard updated > 0 else { return }
+        ui.forgetImages()
+        needsFull = true
+        toast = ui.green("✓") + " Showing your edit" + (updated == 1 ? "" : "s to \(updated) photos")
     }
 
     private func launch(_ arguments: [String]) {
@@ -1055,7 +1138,7 @@ final class ReviewSession {
                 return ui.actionBar(hints: "space look · d file · k keep here · x duplicate · c compare · u undo · esc back",
                                     short: "d file · k keep · x dup · esc", action: fileButton(filing, copies: moving))
             }
-            return ui.actionBar(hints: "space look · k keep · x move · b best · a all · c compare · o show in Finder · u undo · esc back · ? keys",
+            return ui.actionBar(hints: "space look · k keep · x move · b best · a all · c compare · e edit · o show in Finder · u undo · esc back · ? keys",
                                 short: "k keep · x move · ? keys", action: moveButton(movingIDs, label: "Move \(moving)"))
         }
     }
@@ -1597,6 +1680,7 @@ final class ReviewSession {
              row("a", "groups: accept every clear group · in a group: select all"),
              row("c", "compare two photos side by side"), row("z", "zoom in on the faces, when looking closer"),
              row("o", "show the photo in Finder (Photos library: in Photos)"),
+             row("e", "edit in Photos (folders: Preview) · after a: all of them"),
              row("d", "documents tab: file this copy in PGDocuments"), row("tab", "switch between Duplicates and Documents")],
             [row("m", "move or delete the selection (asks first)"), row("u", "undo the last change or move"),
              row("v", "mosaics or filmstrips"), row("n p  ] [", "next or previous group · one still to review"),
