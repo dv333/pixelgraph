@@ -4,10 +4,12 @@ import Foundation
 
 /// The look shared by every PixelGraph screen: one calm palette, text that
 /// always fits its line, frames, the bottom action bar, and photos drawn as
-/// real images in iTerm2 or colour blocks elsewhere.
+/// real images (iTerm2, WezTerm, kitty, Ghostty) or colour blocks elsewhere.
 final class UI: @unchecked Sendable {
     let term = Terminal()
-    var sharp: Bool
+    /// How this terminal shows real images; nil for colour blocks.
+    var graphics: TerminalImage.Graphics?
+    var sharp: Bool { graphics != nil }
     private(set) var active = false
 
     private var images: [String: CGImage] = [:]
@@ -16,25 +18,30 @@ final class UI: @unchecked Sendable {
     func forgetImages() {
         images = [:]
         blocks = [:]
-        jpegs = [:]
+        encoded = [:]
         sizes = [:]
     }
     private var blocks: [String: [String]] = [:]
-    private var jpegs: [String: Data] = [:]
+    /// Pictures ready to send: JPEG for iTerm2's protocol, PNG for kitty's.
+    private var encoded: [String: Data] = [:]
 
     init(graphics: TerminalImage.Mode = .auto) {
-        sharp = graphics.sharp
+        self.graphics = graphics.resolved
     }
 
     func enter() {
         guard !active else { return }
         Theme.detect()
         term.enter()
+        // Keep the window's own title to put back, and name it PixelGraph meanwhile.
+        term.write("\u{1B}[22;0t" + title("PixelGraph"))
         active = true
     }
 
     func leave() {
         guard active else { return }
+        if graphics == .kitty { term.write(TerminalImage.kittyClear) }
+        term.write("\u{1B}[23;0t")
         term.leave()
         active = false
     }
@@ -42,7 +49,35 @@ final class UI: @unchecked Sendable {
     var cols: Int { term.size.cols }
     var rows: Int { term.size.rows }
 
-    func clear() -> String { "\u{1B}[0m\u{1B}[2J" }
+    /// The window's title, e.g. "PixelGraph · Japan 2025 · 12/40 reviewed".
+    func title(_ text: String) -> String { "\u{1B}]2;\(text)\u{07}" }
+
+    /// Too small to lay a screen out well.
+    var tooSmall: Bool { cols < 60 || rows < 16 }
+
+    /// Said instead of a squashed screen, until the window is bigger.
+    func tooSmallScreen() -> String {
+        clear() + at(max(1, rows / 2 - 1), 1) + center(bold("Make the window bigger"), width: cols)
+            + at(max(2, rows / 2), 1) + center(dim("PixelGraph needs at least 60 × 16; this is \(cols) × \(rows)"), width: cols)
+    }
+
+    /// Key hints with the keys in the accent colour and the words dim:
+    /// "k keep · x move · esc back".
+    func hints(_ text: String) -> String {
+        let names: Set<String> = ["space", "enter", "esc", "tab", "home", "end"]
+        return text.components(separatedBy: " · ").map { segment in
+            var words = segment.split(separator: " ").map(String.init)
+            var keys: [String] = []
+            while words.count > 1, let word = words.first, word.count == 1 || names.contains(word) || word.allSatisfy({ "←→↑↓".contains($0) }) {
+                keys.append(words.removeFirst())
+            }
+            guard !keys.isEmpty else { return dim(segment) }
+            return blue(keys.joined(separator: " ")) + dim(" " + words.joined(separator: " "))
+        }.joined(separator: dim(" · "))
+    }
+
+    /// Clears the screen, kitty's images included (clearing the text alone leaves them).
+    func clear() -> String { "\u{1B}[0m\u{1B}[2J" + (graphics == .kitty ? TerminalImage.kittyClear : "") }
 
     // MARK: Text
 
@@ -57,6 +92,9 @@ final class UI: @unchecked Sendable {
 
     /// A filled button, like the one primary action on a screen.
     func button(_ s: String) -> String { Theme.bg(Theme.accent) + Theme.fg(Theme.onAccent) + " \(plain(s)) \u{1B}[0m" }
+
+    /// A filled red button, for an action that can't be undone here (deleting).
+    func dangerButton(_ s: String) -> String { Theme.bg(Theme.red) + Theme.fg(Theme.onRed) + " \(plain(s)) \u{1B}[0m" }
 
     /// The accent bar that marks the selected row, sheets and the bottom bar.
     func bar() -> String { Theme.fg(Theme.accent) + "▌" + "\u{1B}[39m" }
@@ -172,70 +210,161 @@ final class UI: @unchecked Sendable {
         let width = cols - 2
         let room = width - visibleWidth(action) - 2
         let left = visibleWidth(hints) <= room ? hints : short
-        return barLine(rows, spread(dim(clip(left, max(0, room))), action, width: width - 1))
+        return barLine(rows, spread(clip(self.hints(left), max(0, room)), action, width: width - 1))
     }
 
     /// A centred panel over the current screen, for confirmations and choices.
+    /// One too tall for the window is cut short with "…", so it never covers
+    /// the bottom bar.
     func sheet(_ lines: [String], width preferred: Int = 60) -> String {
         let width = min(cols - 2, preferred)
         let panel = Theme.bg(Theme.panel) + Theme.fg(Theme.panelText)
+        let room = max(2, rows - 4)
+        let lines = lines.count > room ? Array(lines.prefix(room - 1)) + [dim("…")] : lines
         let top = max(2, (rows - lines.count) / 2), left = (cols - width) / 2 + 1
+        sheetFrame = (top...(top + lines.count + 1), left...(left + width - 1))
+        sheetButtons = []
         var out = ""
         for (y, text) in ([""] + lines + [""]).enumerated() {
             let body = on(Theme.panel, clip(text, width - 4))
+            for columns in buttonColumns(body) {
+                sheetButtons.append((top + y, (left + 2 + columns.range.lowerBound)...(left + 2 + columns.range.upperBound),
+                                     columns.danger))
+            }
             out += at(top + y, left) + panel + bar() + Theme.fg(Theme.panelText) + " " + body
                 + String(repeating: " ", count: max(0, width - 2 - visibleWidth(body))) + "\u{1B}[0m"
         }
         return out
     }
 
+    /// Where the last sheet was drawn, and its buttons.
+    private var sheetFrame: (rows: ClosedRange<Int>, cols: ClosedRange<Int>)?
+    private var sheetButtons: [(row: Int, cols: ClosedRange<Int>, danger: Bool)] = []
+
+    enum SheetClick: Equatable { case button(danger: Bool), inside, outside }
+
+    /// What a click hit on the sheet showing: a button (the red one deletes,
+    /// the other is the same as enter), somewhere else on it (nothing), or
+    /// outside it (the same as esc).
+    func sheetClick(row: Int, col: Int) -> SheetClick {
+        if let hit = sheetButtons.first(where: { $0.row == row && $0.cols.contains(col) }) { return .button(danger: hit.danger) }
+        if let frame = sheetFrame, frame.rows.contains(row), frame.cols.contains(col) { return .inside }
+        return .outside
+    }
+
+    /// The same for a key; nil when it isn't a click.
+    func sheetClick(_ key: Terminal.Key) -> SheetClick? {
+        guard case .click(let row, let col) = key else { return nil }
+        return sheetClick(row: row, col: col)
+    }
+
+    /// The visible columns of the filled buttons in a line of styled text, and which are red.
+    private func buttonColumns(_ styled: String) -> [(range: ClosedRange<Int>, danger: Bool)] {
+        let accent = Theme.bg(Theme.accent), red = Theme.bg(Theme.red)
+        var ranges: [(range: ClosedRange<Int>, danger: Bool)] = [], start: (column: Int, danger: Bool)?, column = 0, escape = ""
+        for ch in styled {
+            if ch == "\u{1B}" || !escape.isEmpty {
+                escape.append(ch)
+                guard ch.isLetter else { continue }
+                if escape == accent || escape == red {
+                    start = (column, escape == red)
+                } else if escape == "\u{1B}[0m", let first = start {
+                    if column > first.column { ranges.append((first.column...(column - 1), first.danger)) }
+                    start = nil
+                }
+                escape = ""
+                continue
+            }
+            column += 1
+        }
+        return ranges
+    }
+
     // MARK: Photos
 
-    /// A photo file drawn into `cols` × `rows` cells, letterboxed, optionally darkened.
-    func image(_ url: URL, row: Int, col: Int, cols: Int, rows: Int, dim: Bool, large: Bool = false) -> String {
+    private typealias Box = (row: Int, col: Int, cols: Int, rows: Int)
+
+    /// A photo file drawn into `cols` × `rows` cells, letterboxed, optionally
+    /// muted. `crop` (0 … 1, top-left origin) shows just that part, cut from
+    /// the biggest preview so it stays sharp: how z zooms in on faces.
+    func image(_ url: URL, row: Int, col: Int, cols: Int, rows: Int, dim: Bool, large: Bool = false, crop: CGRect? = nil) -> String {
         guard cols > 0, rows > 0 else { return "" }
-        let key = url.path + (dim ? "|dim" : "")
-        if sharp {
-            // iTerm2 draws an image from the left/top of its box; work out the
-            // photo's size in cells and centre the box on it instead.
-            var (row, col, cols, rows) = (row, col, cols, rows)
+        let key = url.path + (dim ? "|dim" : "") + (crop.map { "|\($0.minX),\($0.minY),\($0.width),\($0.height)" } ?? "")
+        if let graphics {
+            var box: Box = (row, col, cols, rows)
             if let size = pixelSize(url) {
-                let aspect = Double(size.width) / Double(size.height)
-                let cell = term.cellAspect
-                let boxAspect = Double(cols) * cell / Double(rows)
-                if aspect < boxAspect {
-                    let fitted = max(1, min(cols, Int((Double(rows) * aspect / cell).rounded())))
-                    col += (cols - fitted) / 2
-                    cols = fitted
-                } else {
-                    let fitted = max(1, min(rows, Int((Double(cols) * cell / aspect).rounded())))
-                    row += (rows - fitted) / 2
-                    rows = fitted
-                }
+                let shown = crop.map { (width: max(1, Int(Double(size.width) * $0.width)), height: max(1, Int(Double(size.height) * $0.height))) } ?? size
+                box = fit(shown, in: box)
             }
             // As many pixels as the box really has on screen (Retina included),
-            // so iTerm2 never has to stretch a small picture up.
-            let side = boxPixels(cols: cols, rows: rows)
-            let sized = key + "|\(side)"
-            if jpegs[sized] == nil {
-                let file = side > 720 ? larger(url) : url
-                if !dim, large, let data = try? Data(contentsOf: file) {
-                    jpegs[sized] = data
-                } else if let source = picture(file, maxSide: side) {
-                    jpegs[sized] = TerminalImage.jpeg(dim ? TerminalImage.darkened(source) ?? source : source)
+            // so the terminal never has to stretch a small picture up.
+            let side = boxPixels(cols: box.cols, rows: box.rows)
+            let sized = key + "|\(side)|\(graphics)"
+            if encoded[sized] == nil {
+                let file = side > 720 || crop != nil ? larger(url) : url
+                if graphics == .iTerm, !dim, large, crop == nil, let data = try? Data(contentsOf: file) {
+                    encoded[sized] = data
+                } else if var source = picture(file, maxSide: crop == nil ? side : 2048) {
+                    if let crop, let cut = TerminalImage.crop(source, to: crop) { source = cut }
+                    if dim { source = TerminalImage.darkened(source) ?? source }
+                    encoded[sized] = graphics == .kitty ? TerminalImage.png(source) : TerminalImage.jpeg(source)
                 }
             }
-            guard let data = jpegs[sized] else { return at(row, col) + self.dim("no preview") }
-            return TerminalImage.iTerm(data, row: row, col: col, cols: cols, rows: rows)
+            guard let data = encoded[sized] else { return at(row, col) + self.dim("no preview") }
+            return place(data, box)
         }
         let blockKey = key + "|\(cols)x\(rows)"
         if blocks[blockKey] == nil {
-            guard let source = picture(url, maxSide: large ? max(cols, rows * 2) * 2 : 480) else {
+            let file = crop == nil ? url : larger(url)
+            guard var source = picture(file, maxSide: crop != nil ? 2048 : large ? max(cols, rows * 2) * 2 : 480) else {
                 return at(row, col) + self.dim("no preview")
             }
+            if let crop, let cut = TerminalImage.crop(source, to: crop) { source = cut }
             blocks[blockKey] = TerminalImage.blocks(source, cols: cols, rows: rows, dim: dim)
         }
         return blocks[blockKey]!.enumerated().map { at(row + $0.offset, col) + $0.element }.joined()
+    }
+
+    /// A picture made on the fly (the font preview in Settings), drawn like a
+    /// photo; `key` names it so it's encoded once.
+    func image(_ picture: CGImage, key: String, row: Int, col: Int, cols: Int, rows: Int) -> String {
+        guard let graphics, cols > 0, rows > 0 else { return "" }
+        let box = fit((picture.width, picture.height), in: (row, col, cols, rows))
+        let sized = key + "|\(graphics)"
+        if encoded[sized] == nil { encoded[sized] = graphics == .kitty ? TerminalImage.png(picture) : TerminalImage.jpeg(picture) }
+        guard let data = encoded[sized] else { return "" }
+        return place(data, box)
+    }
+
+    /// The part of a box a picture of this size fills, centred, in whole
+    /// cells: the terminal draws from the box's top-left, so the box is
+    /// shrunk to the picture instead.
+    private func fit(_ size: (width: Int, height: Int), in box: Box) -> Box {
+        var box = box
+        let aspect = Double(size.width) / Double(max(1, size.height))
+        let cell = term.cellAspect
+        let boxAspect = Double(box.cols) * cell / Double(box.rows)
+        if aspect < boxAspect {
+            let fitted = max(1, min(box.cols, Int((Double(box.rows) * aspect / cell).rounded())))
+            box.col += (box.cols - fitted) / 2
+            box.cols = fitted
+        } else {
+            let fitted = max(1, min(box.rows, Int((Double(box.cols) * cell / aspect).rounded())))
+            box.row += (box.rows - fitted) / 2
+            box.rows = fitted
+        }
+        return box
+    }
+
+    /// Puts encoded picture data on screen, the way this terminal takes it.
+    private func place(_ data: Data, _ box: Box) -> String {
+        switch graphics {
+        case .kitty:
+            // One id per spot on screen, so a redrawn tile replaces its picture.
+            TerminalImage.kitty(data, id: box.row * 1000 + box.col, row: box.row, col: box.col, cols: box.cols, rows: box.rows)
+        default:
+            TerminalImage.iTerm(data, row: box.row, col: box.col, cols: box.cols, rows: box.rows)
+        }
     }
 
     private var sizes: [String: (width: Int, height: Int)] = [:]
@@ -255,7 +384,7 @@ final class UI: @unchecked Sendable {
     /// The long side, in screen pixels, of a box of cells, rounded up to a
     /// step of 128 so the cache isn't redone for every small resize. 480 when
     /// the terminal doesn't say how big its cells are.
-    private func boxPixels(cols: Int, rows: Int) -> Int {
+    func boxPixels(cols: Int, rows: Int) -> Int {
         let window = term.pixelSize, size = term.size
         guard window.width > 0, window.height > 0, size.cols > 0, size.rows > 0 else { return 480 }
         let w = Double(cols) * Double(window.width) / Double(size.cols)

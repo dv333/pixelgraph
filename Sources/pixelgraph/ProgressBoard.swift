@@ -24,6 +24,7 @@ final class ProgressBoard: @unchecked Sendable {
     private var drawnLines = 0
     private var finished = false
     private var lastDraw = Date.distantPast
+    private let begun = Date.now
     private let live: Bool
     /// Prints nothing at all: for the MCP server, whose output is the protocol.
     private let quiet: Bool
@@ -113,7 +114,7 @@ final class ProgressBoard: @unchecked Sendable {
         lastDraw = .now
 
         let (width, height) = terminalSize()
-        var lines = ["", "  " + bold(heading), ""]
+        var lines = ["", "  " + bold(heading), "  " + overall(), ""]
         for stage in stages { lines.append(line(stage, width: min(width, 110))) }
         lines.append("")
         lines.append("  " + (summary.isEmpty ? "" : dim(finished ? "Found: " : "So far: ") + summary))
@@ -135,6 +136,17 @@ final class ProgressBoard: @unchecked Sendable {
         out += lines.map { $0 + "\u{1B}[0m\u{1B}[K" }.joined(separator: "\n") + "\n"
         drawnLines = lines.count
         write(out)
+    }
+
+    /// One bar for the whole scan: finished stages, plus how far the
+    /// running one has got, out of the stages that will run.
+    private func overall() -> String {
+        let counted = stages.filter { $0.state != .skipped }
+        let done = counted.reduce(0.0) { sum, stage in
+            sum + (stage.state == .done ? 1 : stage.state == .running && stage.total > 0 ? Double(stage.done) / Double(stage.total) : 0)
+        }
+        let fraction = finished ? 1 : counted.isEmpty ? 0 : done / Double(counted.count)
+        return Self.bar(fraction, width: 40) + "  " + "\(Int((fraction * 100).rounded()))%" + dim("  " + Self.duration(Date.now.timeIntervalSince(begun)))
     }
 
     private func line(_ stage: Stage, width: Int) -> String {

@@ -70,6 +70,8 @@ struct Run: Codable {
         /// from your choices. Nil in older scans.
         var focus: Float?
         var exposure: Float?
+        /// Bytes on disk, everything included. Nil until known.
+        var bytes: Int?
     }
 
     /// Best first, then kept photos, then the ones moving, moved last.
@@ -82,6 +84,32 @@ struct Run: Codable {
             .sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }
             .map(\.element)
     }
+
+    /// The size of these photos together; nil when none of them is known.
+    func bytes(_ ids: [String]) -> Int? {
+        let wanted = Set(ids)
+        let sizes = allGroups.flatMap(\.photos).filter { wanted.contains($0.id) }.compactMap(\.bytes)
+        return sizes.isEmpty ? nil : sizes.reduce(0, +)
+    }
+
+    /// Photos whose size isn't known yet (older scans).
+    var unsized: [String] { allGroups.flatMap(\.photos).filter { $0.bytes == nil }.map(\.id) }
+
+    /// Writes in each photo's size, from a scan or a lookup.
+    mutating func fillSizes(_ sizes: [String: Int]) {
+        func fill(_ list: inout [Group]) {
+            for g in list.indices {
+                for p in list[g].photos.indices where list[g].photos[p].bytes == nil {
+                    list[g].photos[p].bytes = sizes[list[g].photos[p].id]
+                }
+            }
+        }
+        fill(&groups)
+        if documentGroups != nil { fill(&documentGroups!) }
+        if junkGroups != nil { fill(&junkGroups!) }
+    }
+
+    static func size(_ bytes: Int) -> String { ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file) }
 
     /// Photos selected to move, across all groups.
     var toMove: [String] {

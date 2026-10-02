@@ -1,4 +1,5 @@
 import ArgumentParser
+import CoreGraphics
 import Foundation
 
 /// One thing you can change on the Settings screen, with its default.
@@ -77,8 +78,8 @@ struct Settings: Sendable {
         case findAccidental = "junk.find.accidental", findBlurry = "junk.find.blurry", findCrooked = "junk.find.crooked"
         case findExposure = "junk.find.exposure", findSmudged = "junk.find.smudged", findScreenshots = "junk.find.screenshots"
         case findForwarded = "junk.find.forwarded", findLowQuality = "junk.find.low-quality"
-        case moveDefault = "move.default", moveDescribe = "move.describe"
-        case graphics = "display.graphics", intro = "display.intro", theme = "display.theme"
+        case moveDescribe = "move.describe"
+        case graphics = "display.graphics", intro = "display.intro", theme = "display.theme", font = "display.font"
         case nightly = "nightly.on", nightlyTime = "nightly.time", nightlyDays = "nightly.days"
         case nightlyLimit = "nightly.limit", assistant = "nightly.assistant", emptyDays = "nightly.empty-days"
         case judgeModel = "ai.model", judgeConfidence = "ai.confidence", ollamaHost = "ai.host"
@@ -147,22 +148,22 @@ struct Settings: Sendable {
                 help: "Photos Apple rates poorly, when another sign agrees.",
                 kind: .toggle, standard: "on"),
 
-        Setting(key: .moveDefault, section: "Moving", title: "Enter in the move sheet",
-                help: "What enter does when you move: put photos in PGDuplicates (undo with u), or delete them. The other stays a key away.",
-                kind: .choice(["PGDuplicates", "Delete"]), standard: "PGDuplicates"),
         Setting(key: .moveDescribe, section: "Moving", title: "Describe kept photos",
                 help: "When you move, the photos you keep get a caption, title and keywords after what's there, so Photos search finds them. Undo puts the old ones back.",
                 kind: .toggle, standard: "on"),
 
         Setting(key: .graphics, section: "Display", title: "Photos",
-                help: "auto: sharp photos in iTerm2, colour blocks elsewhere. iterm forces sharp; blocks works in any true-colour terminal.",
-                kind: .choice(["auto", "iterm", "blocks"]), standard: "auto"),
+                help: "auto: sharp photos in iTerm2, WezTerm, kitty and Ghostty, colour blocks elsewhere. iterm or kitty forces that way; blocks works in any true-colour terminal.",
+                kind: .choice(["auto", "iterm", "kitty", "blocks"]), standard: "auto"),
         Setting(key: .theme, section: "Display", title: "Theme",
                 help: "auto follows your terminal's background; light or dark picks one. PIXELGRAPH_THEME still wins when set.",
                 kind: .choice(["auto", "light", "dark"]), standard: "auto"),
         Setting(key: .intro, section: "Display", title: "Opening title",
                 help: "The rack-focus title when PixelGraph starts (in terminals that can show images).",
                 kind: .toggle, standard: "on"),
+        Setting(key: .font, section: "Display", title: "Font",
+                help: "For the opening title and the headings of the web report. Text on these screens is your terminal's own font, set in the terminal's settings.",
+                kind: .choice(Typeface.allCases.map(\.rawValue)), standard: Typeface.sfMono.rawValue),
 
         Setting(key: .nightly, section: "Nightly clean-up", title: "Run every night",
                 help: "Moves clear duplicates from recent photos to PGDuplicates at the time below; never deletes. Close calls wait for you.",
@@ -259,6 +260,7 @@ struct Settings: Sendable {
     }
 
     var graphics: TerminalImage.Mode { TerminalImage.Mode(rawValue: self[.graphics]) ?? .auto }
+    var typeface: Typeface { Typeface(rawValue: self[.font]) ?? .sfMono }
 
     /// Ollama's address when you've set one; otherwise OLLAMA_HOST or the usual.
     var ollamaHost: String? { isDefault(.ollamaHost) ? nil : self[.ollamaHost] }
@@ -286,8 +288,13 @@ final class SettingsScreen {
     private var toast: String?
     /// Esc with unsaved changes: "Save your changes?" is showing.
     private var confirmingLeave = false
+    /// ? was pressed: the keys are showing; any key closes them.
+    private var showingKeys = false
+    /// The opening title in each font, as drawn for the preview, by font, size and theme.
+    private var previews: [String: CGImage] = [:]
 
-    private enum Line { case heading(String), setting(Setting) }
+    /// A section heading, a setting, or the last row that sets them all back.
+    private enum Line { case heading(String), setting(Setting), resetAll }
     private let lines: [Line] = {
         var lines: [Line] = []
         var section = ""
@@ -299,8 +306,18 @@ final class SettingsScreen {
             }
             lines.append(.setting(setting))
         }
-        return lines
+        return lines + [.heading(""), .resetAll]
     }()
+
+    private func isSelectable(_ line: Line) -> Bool {
+        if case .heading = line { return false }
+        return true
+    }
+
+    private var onResetAll: Bool {
+        guard lines.indices.contains(selected), case .resetAll = lines[selected] else { return false }
+        return true
+    }
 
     init(ui: UI) {
         self.ui = ui
@@ -334,6 +351,10 @@ final class SettingsScreen {
     private func handle(_ key: Terminal.Key) -> Bool {
         if key == .resize { return false }
         toast = nil
+        if showingKeys {
+            showingKeys = false
+            return false
+        }
         if confirmingLeave {
             switch key {
             case .enter, .char("s"), .char("y"):
@@ -341,7 +362,15 @@ final class SettingsScreen {
                 return true
             case .char("d"), .char("n"):
                 return true
-            case .escape, .backspace, .click: confirmingLeave = false
+            case .click(let row, let col):
+                switch ui.sheetClick(row: row, col: col) {
+                case .button:
+                    save()
+                    return true
+                case .outside: confirmingLeave = false
+                case .inside: break
+                }
+            case .escape, .backspace: confirmingLeave = false
             default: break
             }
             return false
@@ -351,9 +380,13 @@ final class SettingsScreen {
         case .escape, .quit, .char("q"), .backspace:
             if pending.isEmpty { return true }
             confirmingLeave = true
-        case .up, .char("k"): move(-1)
-        case .down, .char("j"): move(1)
+        case .up: move(-1)
+        case .down: move(1)
+        case .home: selected = 0; move(1)
+        case .end: selected = lines.count; move(-1)
+        case .char("?"): showingKeys = true
         case .scroll(let ticks): if ticks != 0 { move(ticks > 0 ? 1 : -1) }
+        case _ where onResetAll && [.enter, .right, .char(" "), .char("d")].contains(key): resetAll()
         case .left: change(-1)
         case .right, .char(" "): change(1)
         case .enter:
@@ -372,13 +405,9 @@ final class SettingsScreen {
             }
         case .char("d"):
             if let setting = current { set(setting, setting.standard) }
-        case .char("D"):
-            for setting in Settings.all { set(setting, setting.standard) }
-            toast = pending.isEmpty ? ui.dim("Everything is already at its default.")
-                : ui.amber("Every setting set to its default · s to save, esc to drop")
         case .click(let row, _):
             let index = row - top + scroll
-            if lines.indices.contains(index), case .setting = lines[index] { selected = index }
+            if row - top < listRows, lines.indices.contains(index), isSelectable(lines[index]) { selected = index }
         default: break
         }
         return false
@@ -387,9 +416,16 @@ final class SettingsScreen {
     private func move(_ step: Int) {
         var next = selected + step
         while lines.indices.contains(next) {
-            if case .setting = lines[next] { selected = next; return }
+            if isSelectable(lines[next]) { selected = next; return }
             next += step
         }
+    }
+
+    /// The last row: every setting back to its default, as unsaved changes.
+    private func resetAll() {
+        for setting in Settings.all { set(setting, setting.standard) }
+        toast = pending.isEmpty ? ui.dim("Everything is already at its default.")
+            : ui.amber("Every setting set to its default · s to save, esc to drop")
     }
 
     private func change(_ direction: Int) {
@@ -457,16 +493,23 @@ final class SettingsScreen {
     private var top: Int { 4 }
     /// Rows for the list: the help underneath takes four, the bar one.
     private var visible: Int { max(3, ui.rows - top - 6) }
+    /// Rows the font preview takes from the bottom of the list: a gap, then the picture.
+    private let previewRows = 6
+    /// Font is highlighted and the terminal shows real images: the list
+    /// makes room for the opening title in that font.
+    private var showsPreview: Bool { current?.key == .font && ui.sharp && visible - previewRows >= 3 }
+    private var listRows: Int { showsPreview ? visible - previewRows : visible }
 
     private func draw() {
+        if ui.tooSmall { return ui.term.write(ui.tooSmallScreen()) }
         if selected < scroll { scroll = selected }
-        if selected >= scroll + visible { scroll = selected - visible + 1 }
+        if selected >= scroll + listRows { scroll = selected - listRows + 1 }
         var out = ui.clear()
         let changed = Settings.Key.allCases.filter { value($0) != Settings.specs[$0]?.standard }.count
         var heading = ui.dim("  ·  " + (changed == 0 ? "all defaults" : "\(changed) changed from the default"))
         if !pending.isEmpty { heading += ui.amber("  ·  \(pending.count) unsaved") }
         out += ui.at(2, left) + ui.clip(ui.bold("Settings") + heading, width)
-        for (n, index) in lines.indices.dropFirst(scroll).prefix(visible).enumerated() {
+        for (n, index) in lines.indices.dropFirst(scroll).prefix(listRows).enumerated() {
             let row = top + n
             switch lines[index] {
             case .heading(let text): out += ui.at(row, left) + ui.dim(text)
@@ -481,8 +524,16 @@ final class SettingsScreen {
                 out += index == selected
                     ? ui.at(row, left - 2) + ui.bar() + ui.highlight(" " + line, width: width)
                     : ui.at(row, left) + line
+            case .resetAll:
+                let line = ui.spread("  Set every setting back to its default…", ui.dim(changed == 0 ? "all defaults" : "\(changed) changed"),
+                                     width: width - 2)
+                out += index == selected
+                    ? ui.at(row, left - 2) + ui.bar() + ui.highlight(" " + line, width: width)
+                    : ui.at(row, left) + ui.dim(line)
             }
         }
+        // Under the sheet the picture would show through, so it waits.
+        if showsPreview, !confirmingLeave { out += preview(row: top + listRows + 1) }
         if let setting = current {
             let helpTop = top + visible + 1
             for (n, text) in ui.wrap(setting.help, width: width - 2, lines: 2).enumerated() {
@@ -491,18 +542,37 @@ final class SettingsScreen {
             var note = value(setting.key) == setting.standard ? "default" : "default: \(setting.display(setting.standard)) · d sets it"
             if pending[setting.key] != nil { note += " · saved: \(setting.display(settings[setting.key]))" }
             out += ui.at(helpTop + 2, left) + ui.dim(note)
+        } else if onResetAll {
+            let help = "Marks every setting for its default. Nothing changes until you press s; esc drops it."
+            for (n, text) in ui.wrap(help, width: width - 2, lines: 2).enumerated() {
+                out += ui.at(top + visible + 1 + n, left) + ui.dim(text)
+            }
         }
         if let toast { out += ui.at(ui.rows - 1, left) + ui.clip(toast, width) }
         let hints: String
         if typing != nil {
             hints = "type a value · enter set · esc cancel"
         } else {
-            hints = "↑↓ choose · ←→ change · enter \(current.map(verb) ?? "change") · d default · D all defaults · esc back"
+            hints = onResetAll ? "↑↓ choose · enter set them all · esc back · ? keys"
+                : "↑↓ choose · ←→ change · enter \(current.map(verb) ?? "change") · d default · esc back · ? keys"
         }
         let action = pending.isEmpty || typing != nil ? "" : ui.button("s Save \(pending.count) change\(pending.count == 1 ? "" : "s")")
         let room = width - ui.visibleWidth(action) - 2
         out += ui.barLine(ui.rows, String(repeating: " ", count: max(0, left - 3))
-            + ui.spread(ui.dim(ui.clip(hints, max(0, room))), action, width: width))
+            + ui.spread(ui.clip(ui.hints(hints), max(0, room)), action, width: width))
+        if showingKeys {
+            func row(_ key: String, _ text: String) -> String { ui.blue(key.padding(toLength: 10, withPad: " ", startingAt: 0)) + text }
+            out += ui.sheet([
+                ui.bold("Keys"), "",
+                row("↑ ↓", "choose a setting (home and end: first and last)"),
+                row("← →", "change it"),
+                row("enter", "switch, next, or type a value"),
+                row("d", "set it back to its default"),
+                row("s", "save your changes; until then they're amber with a *"),
+                row("esc", "back (asks first if something isn't saved)"),
+                "", ui.dim("any key to close"),
+            ], width: 68)
+        }
         if confirmingLeave {
             let w = min(ui.cols - 2, 60) - 4
             let names = pending.keys.compactMap { Settings.specs[$0]?.title }.sorted().joined(separator: ", ")
@@ -511,6 +581,20 @@ final class SettingsScreen {
                 + ["", ui.spread("", ui.dim("esc Keep editing   d Discard   ") + ui.button("enter Save"), width: w)], width: 64)
         }
         ui.term.write(out)
+    }
+
+    /// The opening title, settled, in the font shown (saved or not), across
+    /// the column at the box's real pixel size so it stays sharp.
+    private func preview(row: Int) -> String {
+        let typeface = Typeface(rawValue: value(.font)) ?? .sfMono
+        let rows = previewRows - 1
+        let long = ui.boxPixels(cols: width, rows: rows)
+        let aspect = Double(width) * ui.term.cellAspect / Double(rows)
+        let size = (width: long, height: max(1, Int((Double(long) / aspect).rounded())))
+        let key = "\(typeface.rawValue) \(size.width)x\(size.height) \(Theme.light)"
+        if previews[key] == nil { previews[key] = Intro.still(width: size.width, height: size.height, typeface: typeface) }
+        guard let picture = previews[key] else { return "" }
+        return ui.image(picture, key: "font preview " + key, row: row, col: left, cols: width, rows: rows)
     }
 }
 

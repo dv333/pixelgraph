@@ -133,3 +133,36 @@ enum Analyzer {
         return sumSquares / n - mean * mean
     }
 }
+
+/// Faces in the photo being looked at, for z (zoom in on the faces).
+enum Faces {
+    /// Where the faces are, 0 … 1 with a top-left origin.
+    static func boxes(in image: CGImage) -> [CGRect] {
+        let request = VNDetectFaceRectanglesRequest()
+        guard (try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])) != nil else { return [] }
+        return (request.results ?? []).map { face in
+            let box = face.boundingBox
+            return CGRect(x: box.minX, y: 1 - box.maxY, width: box.width, height: box.height)
+        }
+    }
+
+    /// The part of a photo that shows all its faces with room around them,
+    /// shaped like the box it's drawn in. `aspect` is the photo's width ÷
+    /// height, `boxAspect` the box's, both in pixels. Nil without faces.
+    static func crop(_ faces: [CGRect], aspect: Double, boxAspect: Double) -> CGRect? {
+        guard var area = faces.first else { return nil }
+        for face in faces.dropFirst() { area = area.union(face) }
+        // Room around: half a face on every side, and never closer than an
+        // eighth of the photo, so a small face isn't blown up into mush.
+        let margin = max(area.width, area.height) * 0.5
+        var w = max(area.width + margin * 2, 0.125), h = max(area.height + margin * 2, 0.125)
+        // Shape it like the box (widths compared in pixels).
+        if w * aspect / h < boxAspect { w = h * boxAspect / aspect } else { h = w * aspect / boxAspect }
+        // Too big for the photo: shrink it, keeping its shape.
+        let over = max(w, h, 1)
+        w /= over
+        h /= over
+        let x = min(max(0, area.midX - w / 2), 1 - w), y = min(max(0, area.midY - h / 2), 1 - h)
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+}

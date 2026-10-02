@@ -107,6 +107,22 @@ struct Item: @unchecked Sendable {
         location = asset.location.map { Location(latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude) }
     }
 
+    /// Bytes on disk: everything a library photo keeps (the original, any
+    /// edit, a Live Photo's video), or the file itself. Nil when unknown.
+    var bytes: Int? {
+        switch backing {
+        case .photo(let asset):
+            // Photos tells apps a resource's size only through this key.
+            let key = "fileSize"
+            let sizes = PHAssetResource.assetResources(for: asset)
+                .filter { $0.responds(to: NSSelectorFromString(key)) }
+                .compactMap { ($0.value(forKey: key) as? NSNumber)?.intValue }
+            return sizes.isEmpty ? nil : sizes.reduce(0, +)
+        case .file(let url):
+            return (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+        }
+    }
+
     /// nil for files that aren't images.
     init?(file url: URL) {
         let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey, .fileSizeKey])

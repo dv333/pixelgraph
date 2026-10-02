@@ -4,8 +4,11 @@ import SQLite3
 /// Where PixelGraph keeps its index, last run and report.
 enum Paths {
     static let root: URL = {
-        // A separate data folder, for tests and trying things out.
-        if let custom = ProcessInfo.processInfo.environment["PIXELGRAPH_HOME"] {
+        // A separate data folder, for tests and trying things out. Tests always
+        // get one, whichever test reads this first, so they never touch your data.
+        let testing = ["swiftpm-testing-helper", "xctest"].contains(ProcessInfo.processInfo.processName)
+        let testHome = FileManager.default.temporaryDirectory.appendingPathComponent("pixelgraph-test-home").path
+        if let custom = ProcessInfo.processInfo.environment["PIXELGRAPH_HOME"] ?? (testing ? testHome : nil) {
             let url = URL(fileURLWithPath: custom, isDirectory: true)
             try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
             return url

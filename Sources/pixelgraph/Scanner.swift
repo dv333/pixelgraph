@@ -133,6 +133,9 @@ struct Scanner {
         } else {
             board.skip(8, detail: "off")
         }
+        // How big each photo is, so the review can say how much a move takes away.
+        run.fillSizes(Dictionary(run.allGroups.flatMap(\.photos).compactMap { m in lookup[m.id]?.bytes.map { (m.id, $0) } },
+                                 uniquingKeysWith: { first, _ in first }))
         try run.save(to: options.runFile)
 
         let previewCount = run.allGroups.reduce(0) { $0 + $1.photos.count }
@@ -140,7 +143,8 @@ struct Scanner {
         try await Report.write(run, items: lookup, offline: options.offline, in: options.reportFolder) { done, _ in board.advance(9, done: done) }
         board.finish(9, detail: "ready to review")
         board.setSummary(summary(groups: groups.count, moving: run.toMove.count, problems: problems.count,
-                                 documents: run.documentGroups.map { $0.reduce(0) { $0 + $1.photos.count } } ?? 0))
+                                 documents: run.documentGroups.map { $0.reduce(0) { $0 + $1.photos.count } } ?? 0,
+                                 bytes: run.bytes(run.toMove)))
         board.end()
         if options.runFile == Paths.lastRun { Recents.record(run) }
         Places.note(.scanned, source)
@@ -265,8 +269,9 @@ struct Scanner {
 
     private var fetchPolicy: Library.Fetch { options.offline ? .localOnly : .download(timeout: 60) }
 
-    private func summary(groups: Int, moving: Int, problems: Int, documents: Int) -> String {
-        var parts = ["\u{1B}[1m\(groups)\u{1B}[22m groups", "\u{1B}[1m\(moving)\u{1B}[22m photos you could move"]
+    private func summary(groups: Int, moving: Int, problems: Int, documents: Int, bytes: Int? = nil) -> String {
+        var parts = ["\u{1B}[1m\(groups)\u{1B}[22m groups",
+                     "\u{1B}[1m\(moving)\u{1B}[22m photos you could move" + (bytes.map { " (\(Run.size($0)))" } ?? "")]
         if documents > 0 { parts.append("\u{1B}[1m\(documents)\u{1B}[22m documents") }
         if problems > 0 { parts.append(Theme.fg(Theme.amber) + "\(problems)\u{1B}[39m look like rejects") }
         return parts.joined(separator: " · ")

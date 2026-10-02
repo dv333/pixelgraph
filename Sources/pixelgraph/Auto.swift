@@ -231,12 +231,14 @@ struct Empty: AsyncParsableCommand {
     @Flag(help: "Don't ask; for scripts.")
     var yes = false
 
-    func run() async throws {
-        let olderThan = self.olderThan ?? Settings.load().int(.emptyDays)
-        let entries = Staged.older(than: olderThan)
+    /// What has waited `days` in PGDuplicates or PGJunk and is still there;
+    /// anything taken back out since is forgotten. Library photos are only
+    /// looked at with `photos` (access to Photos).
+    static func due(olderThan days: Int, photos withPhotos: Bool = true) async throws -> (photos: [String], files: [URL]) {
+        let entries = Staged.older(than: days)
         var photos: [String] = [], files: [URL] = [], gone: [String] = []
         let library = entries.filter { !$0.id.hasPrefix("file:") }
-        if !library.isEmpty {
+        if !library.isEmpty, withPhotos {
             try await Library.requestAccess()
             // Still in the album it was moved to? Then it's still meant to go.
             for (place, group) in Dictionary(grouping: library, by: \.place) {
@@ -249,6 +251,23 @@ struct Empty: AsyncParsableCommand {
             if FileManager.default.fileExists(atPath: url.path) { files.append(url) } else { gone.append(entry.id) }
         }
         Staged.remove(gone)
+        return (photos, files)
+    }
+
+    /// Photos to Recently Deleted (macOS asks first), files to the Trash.
+    static func delete(photos: [String], files: [URL]) async throws -> (photos: Int, files: Int) {
+        if !photos.isEmpty { try await Library.delete(photos) }
+        var trashed: [String] = []
+        for url in files where (try? FileManager.default.trashItem(at: url, resultingItemURL: nil)) != nil {
+            trashed.append("file:" + url.path)
+        }
+        Staged.remove(photos + trashed)
+        return (photos.count, trashed.count)
+    }
+
+    func run() async throws {
+        let olderThan = self.olderThan ?? Settings.load().int(.emptyDays)
+        let (photos, files) = try await Self.due(olderThan: olderThan)
         guard !photos.isEmpty || !files.isEmpty else {
             print("Nothing has waited \(olderThan) days in PGDuplicates or PGJunk.")
             return
@@ -262,12 +281,7 @@ struct Empty: AsyncParsableCommand {
                 return
             }
         }
-        if !photos.isEmpty { try await Library.delete(photos) }
-        var trashed: [String] = []
-        for url in files where (try? FileManager.default.trashItem(at: url, resultingItemURL: nil)) != nil {
-            trashed.append("file:" + url.path)
-        }
-        Staged.remove(photos + trashed)
-        print("Deleted \(photos.count) photos and \(trashed.count) files.")
+        let deleted = try await Self.delete(photos: photos, files: files)
+        print("Deleted \(deleted.photos) photos and \(deleted.files) files.")
     }
 }

@@ -95,6 +95,15 @@ enum Library {
         return all(PHAsset.fetchAssets(in: collection, options: imagesOnly()))
     }
 
+    /// How many photos were taken since `from`, without loading them.
+    static func count(from: Date) -> Int {
+        let options = imagesOnly()
+        options.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            options.predicate!, NSPredicate(format: "creationDate >= %@", from as NSDate),
+        ])
+        return PHAsset.fetchAssets(with: options).count
+    }
+
     /// Photos taken in a date range, oldest first.
     static func assets(from: Date?, to: Date?) -> [PHAsset] {
         let options = imagesOnly()

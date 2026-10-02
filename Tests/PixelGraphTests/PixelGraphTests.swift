@@ -441,7 +441,7 @@ private func member(_ id: String, sharpness: Float = 0.01, aesthetic: Float = 0)
 }
 
 @Test func httpRequestWaitsForTheWholeBody() throws {
-    let partial = Data("POST /mcp/abc HTTP/1.1\r\nContent-Length: 10\r\n\r\n{\"a\":".utf8)
+    let partial = Data("POST /mcp/abc HTTP/1.1\r\nContent-Length: 9\r\n\r\n{\"a\":".utf8)
     #expect(HTTPRequest(partial) == nil)
     let request = try #require(HTTPRequest(partial + Data("1}  ".utf8)))
     #expect(request.method == "POST" && request.path == "/mcp/abc")
@@ -523,6 +523,19 @@ private func member(_ id: String, sharpness: Float = 0.01, aesthetic: Float = 0)
     #expect(changed.changed == 2)
 }
 
+@Test func everyFontCanBeChosenAndDrawn() throws {
+    #expect(Settings(saved: [:]).typeface == .sfMono)
+    #expect(Settings(saved: ["display.font": "futura"]).typeface == .futura)
+    #expect(Settings(saved: ["display.font": "Comic Sans"]).typeface == .sfMono)
+    let font = try #require(Settings.specs[.font])
+    #expect(font.step("New York", by: 1) == "SF Mono")
+    for typeface in Typeface.allCases {
+        #expect(typeface.font(size: 40, weight: .light).pointSize == 40)
+        #expect(!typeface.css.isEmpty)
+        #expect(Intro.still(width: 880, height: 100, typeface: typeface)?.width == 880)
+    }
+}
+
 @Test func sourcesCountForTheirMonths() {
     let calendar = Calendar.current
     let march = calendar.date(from: DateComponents(year: 2024, month: 3, day: 1))!
@@ -559,4 +572,59 @@ private func member(_ id: String, sharpness: Float = 0.01, aesthetic: Float = 0)
     db.addRecent(Recents.Entry(source: .folder(path: "/b"), date: t0, photos: 10, groups: 2))
     db.addRecent(Recents.Entry(source: .folder(path: "/b"), date: t0.addingTimeInterval(1), photos: 12, groups: 3))
     #expect(db.recents().count == 1 && db.recents().first?.photos == 12)
+}
+
+@Test func faceZoomFramesEveryFaceInsideThePhoto() throws {
+    #expect(Faces.crop([], aspect: 1.5, boxAspect: 2) == nil)
+    // One face in the middle of a 3:2 photo, shown in a 2:1 box.
+    let face = CGRect(x: 0.45, y: 0.4, width: 0.1, height: 0.15)
+    let crop = try #require(Faces.crop([face], aspect: 1.5, boxAspect: 2))
+    #expect(crop.contains(face))
+    #expect(abs(crop.width * 1.5 / crop.height - 2) < 0.001)
+    // Two faces at the edges: both in, and the crop stays inside the photo.
+    let pair = [CGRect(x: 0.02, y: 0.1, width: 0.1, height: 0.1), CGRect(x: 0.85, y: 0.8, width: 0.12, height: 0.15)]
+    let wide = try #require(Faces.crop(pair, aspect: 1.5, boxAspect: 1))
+    #expect(wide.minX >= 0 && wide.minY >= 0 && wide.maxX <= 1.0001 && wide.maxY <= 1.0001)
+}
+
+@Test func kittyImagesComeInSmallChunksAndReplaceTheirSpot() {
+    let png = Data(repeating: 7, count: 10_000)
+    let out = TerminalImage.kitty(png, id: 3005, row: 3, col: 5, cols: 20, rows: 6)
+    #expect(out.hasPrefix("\u{1B}_Ga=d,d=I,i=3005,q=2\u{1B}\\\u{1B}[3;5H"))
+    let chunks = out.components(separatedBy: "\u{1B}_G").dropFirst(2)
+    #expect(chunks.count == 4)
+    #expect(chunks.first?.hasPrefix("a=T,f=100,i=3005,q=2,C=1,c=20,r=6,") == true)
+    #expect(chunks.allSatisfy { ($0.split(separator: ";", maxSplits: 1).last?.count ?? 0) <= 4096 + 2 })
+    #expect(chunks.dropLast().allSatisfy { $0.contains("m=1;") } && chunks.last?.hasPrefix("m=0;") == true)
+}
+
+@Test func clickingASheetsButtonIsTheSameAsItsKey() {
+    let ui = UI(graphics: .blocks)
+    // Not a terminal, so the screen counts as 80 × 24: the sheet is 60 wide at column 11, rows 10–14.
+    _ = ui.sheet(["Delete them?", "", ui.spread("", ui.dim("esc Cancel   ") + ui.dangerButton("d Delete 3") + "  " + ui.button("enter Move 3"),
+                                             width: 56)], width: 60)
+    // The buttons sit at the end of the last line: " d Delete 3 " then two spaces then " enter Move 3 ".
+    #expect(ui.sheetClick(row: 13, col: 63) == .button(danger: false))
+    #expect(ui.sheetClick(row: 13, col: 50) == .button(danger: true))
+    #expect(ui.sheetClick(row: 11, col: 20) == .inside)
+    #expect(ui.sheetClick(row: 3, col: 3) == .outside)
+    #expect(ui.sheetClick(.char("x")) == nil)
+}
+
+@Test func sizesAddUpForTheSelection() {
+    var run = Run(date: t0, scope: "test", scanned: 3, rules: GroupingRules(momentThreshold: 0.5, momentWindow: 600, sceneThreshold: 0.3),
+                  groups: [Run.Group(kind: .copies, photos: [member("A"), member("B"), member("C")],
+                                     pick: Pick(best: "A", decidedBy: "vision", notes: [:]))])
+    #expect(run.bytes(["B", "C"]) == nil && run.unsized == ["A", "B", "C"])
+    run.fillSizes(["B": 2_000_000, "C": 3_000_000])
+    #expect(run.bytes(["B", "C"]) == 5_000_000 && run.unsized == ["A"])
+    #expect(Run.size(5_000_000) == ByteCountFormatter.string(fromByteCount: 5_000_000, countStyle: .file))
+}
+
+@Test func hintsColourTheKeysAndDimTheWords() {
+    let ui = UI(graphics: .blocks)
+    let text = ui.hints("k keep · ← → photos · type a value · ? keys")
+    #expect(ui.plain(text) == "k keep · ← → photos · type a value · ? keys")
+    #expect(text.contains(ui.blue("k")) && text.contains(ui.blue("← →")) && text.contains(ui.blue("?")))
+    #expect(!text.contains(ui.blue("type")))
 }

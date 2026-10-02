@@ -147,7 +147,7 @@ enum Report {
                     mark = #"<span class="mark moved">Moved</span>"#
                     caption = #"<p class="note muted">\#(escape(photo.document ?? "Document"))</p>"#
                 case "doc-move":
-                    mark = #"<span class="check" aria-label="Copy, moving to Duplicates">✓</span>"#
+                    mark = #"<span class="check" aria-label="Copy, moving to Duplicates">→</span>"#
                     let same = photo.sameText.map { " · same text \(Int(($0 * 100).rounded()))%" } ?? ""
                     caption = #"<p class="note move">Copy → Duplicates\#(same)</p>"#
                 case "best":
@@ -160,7 +160,7 @@ enum Report {
                     mark = #"<span class="mark moved">Moved</span>"#
                     caption = #"<p class="note muted">Moved to Duplicates</p>"#
                 default:
-                    mark = #"<span class="check" aria-label="Selected to move">✓</span>"#
+                    mark = #"<span class="check" aria-label="Selected to move">→</span>"#
                     let why = pick.reasons[id] ?? pick.suggestions[id]
                     caption = why.map { #"<p class="note move">Move · <span class="why">\#(escape($0))</span></p>"# }
                         ?? #"<p class="note move">Move · \#(escape(pick.notes[id] ?? ""))</p>"#
@@ -214,7 +214,8 @@ enum Report {
             <html lang="en"><head><meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <title>PixelGraph Review</title>
-            <style>\(css)</style></head>
+            <style>:root { --display: \(Settings.load().typeface.css); }
+            \(css)</style></head>
             <body>
             <main>
               <p class="brand">PixelGraph</p>
@@ -305,7 +306,7 @@ enum Report {
           full.src = fig.dataset.full;
           $('.where', viewer).textContent = `${fig.closest('.group').dataset.title} · ${index + 1} of ${figures.length}`;
           const state = ['best', 'keep', 'move', 'moved'].find(c => fig.classList.contains(c));
-          $('.state', viewer).textContent = { best: '★ Best', keep: 'Keep', move: '✓ Move', moved: 'Moved' }[state];
+          $('.state', viewer).textContent = { best: '★ Best', keep: 'Keep', move: '→ Move', moved: 'Moved' }[state];
           $('.state', viewer).className = 'state ' + state;
           $('footer .note', viewer).innerHTML = $('.note', fig).innerHTML;
           $('footer .note', viewer).className = $('.note', fig).className;
@@ -365,6 +366,7 @@ enum Report {
                font: 15px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
                -webkit-font-smoothing: antialiased; }
         body.viewing { overflow: hidden; }
+        .brand, h1, .stats b, .group h2, .section { font-family: var(--display); }
         main { max-width: 1600px; margin: 0 auto; padding: 40px 32px 120px; }
         .brand { margin: 0; color: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: .02em; }
         h1 { font-size: 40px; letter-spacing: -0.02em; margin: 2px 0 4px; font-weight: 700; }

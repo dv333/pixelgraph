@@ -18,7 +18,8 @@ struct PlaceStatus: Sendable {
 
     /// "reviewed · 12 Sep", "moved 34 · 12 Sep".
     var text: String {
-        let what = step == .moved ? "moved \(moved)" : step.rawValue
+        // Opening a review isn't progress; older notes of it read as the scan they followed.
+        let what = step == .moved ? "moved \(moved)" : step == .opened ? "scanned" : step.rawValue
         let sameYear = Calendar.current.isDate(date, equalTo: .now, toGranularity: .year)
         let when = sameYear ? date.formatted(.dateTime.day().month(.abbreviated))
             : date.formatted(.dateTime.day().month(.abbreviated).year())

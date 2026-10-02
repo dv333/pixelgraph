@@ -42,7 +42,7 @@ enum Intro {
         let scale = min(1, widest / Double(width))
         width = max(320, Int(Double(width) * scale))
         height = max(120, Int(Double(height) * scale))
-        guard let scene = RackFocus(width: width, height: height) else { return }
+        guard let scene = RackFocus(width: width, height: height, typeface: Settings.load().typeface) else { return }
 
         term.write("\u{1B}[2J")
         let start = Date.now, fps = 24.0
@@ -59,6 +59,11 @@ enum Intro {
         term.drainInput()
         if graphics == .kitty { term.write("\u{1B}_Ga=d,d=A,q=2\u{1B}\\") }
         term.write("\u{1B}[0m\u{1B}[2J")
+    }
+
+    /// The title as it looks once it has settled, for the preview in Settings.
+    static func still(width: Int, height: Int, typeface: Typeface) -> CGImage? {
+        RackFocus(width: width, height: height, typeface: typeface)?.frame(at: 2.3)
     }
 
     private static func encode(_ image: CGImage, _ graphics: Graphics) -> Data? {
@@ -150,7 +155,7 @@ private final class RackFocus {
         CGColor(srgbRed: c.0, green: c.1, blue: c.2, alpha: alpha)
     }
 
-    init?(width: Int, height: Int) {
+    init?(width: Int, height: Int, typeface: Typeface) {
         self.width = width
         self.height = height
         guard let main = Self.makeContext(width, height), let bokeh = Self.makeContext(width / 2, height / 2) else { return nil }
@@ -161,12 +166,12 @@ private final class RackFocus {
 
         let look = Theme.light ? Look.light : Look.dark
         self.look = look
-        guard let word = Self.text("pixelgraph", width: width, height: height, size: size, weight: .light,
+        guard let word = Self.text("pixelgraph", typeface: typeface, width: width, height: height, size: size, weight: .light,
                                    color: Self.cg(look.name), y: H / 2),
-              let tinted = Self.text("pixelgraph", width: width, height: height, size: size, weight: .light,
+              let tinted = Self.text("pixelgraph", typeface: typeface, width: width, height: height, size: size, weight: .light,
                                      color: Self.cg(look.glow), y: H / 2),
               let glow = Self.soften(tinted, 0.07),
-              let tagline = Self.text("EVERY MOMENT, ONCE", width: width, height: height, size: max(10, W * 0.0105),
+              let tagline = Self.text("EVERY MOMENT, ONCE", typeface: typeface, width: width, height: height, size: max(10, W * 0.0105),
                                       weight: .regular, color: Self.cg(look.tagline, 0.8),
                                       y: H * 0.2, tracking: 0.32),
               let vignette = Self.vignette(width, height, edge: look.edge),
@@ -185,7 +190,7 @@ private final class RackFocus {
         dotRadius = step * 0.42
         blur = H * 0.085
         var random = SplitMix(seed: 17)
-        for (x, y) in Self.sample("pixelgraph", width: width, height: height, size: size, step: step) {
+        for (x, y) in Self.sample("pixelgraph", typeface: typeface, width: width, height: height, size: size, step: step) {
             dots.append((x + (random.next() - 0.5) * step * 0.3, y + (random.next() - 0.5) * step * 0.3,
                          0.5 + (random.next() - 0.5) * 0.05))
         }
@@ -278,8 +283,9 @@ private final class RackFocus {
                   space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
     }
 
-    private static func textLine(_ string: String, size: Double, weight: NSFont.Weight, color: CGColor, tracking: Double) -> CTLine {
-        let font = NSFont.monospacedSystemFont(ofSize: size, weight: weight)
+    private static func textLine(_ string: String, typeface: Typeface, size: Double, weight: NSFont.Weight, color: CGColor,
+                                 tracking: Double) -> CTLine {
+        let font = typeface.font(size: size, weight: weight)
         let attributes: [NSAttributedString.Key: Any] = [
             NSAttributedString.Key(kCTFontAttributeName as String): font,
             NSAttributedString.Key(kCTForegroundColorAttributeName as String): color,
@@ -289,29 +295,30 @@ private final class RackFocus {
     }
 
     /// Draws `string` centred on the vertical position `y` (from the bottom).
-    private static func draw(_ string: String, in context: CGContext, width: Int, size: Double, weight: NSFont.Weight,
-                             color: CGColor, y: Double, tracking: Double) {
-        let ctLine = textLine(string, size: size, weight: weight, color: color, tracking: tracking)
+    private static func draw(_ string: String, typeface: Typeface, in context: CGContext, width: Int, size: Double,
+                             weight: NSFont.Weight, color: CGColor, y: Double, tracking: Double) {
+        let ctLine = textLine(string, typeface: typeface, size: size, weight: weight, color: color, tracking: tracking)
         let bounds = CTLineGetImageBounds(ctLine, context)
         context.textPosition = CGPoint(x: (Double(width) - bounds.width) / 2 - bounds.minX, y: y - bounds.height / 2 - bounds.minY)
         CTLineDraw(ctLine, context)
     }
 
-    private static func text(_ string: String, width: Int, height: Int, size: Double, weight: NSFont.Weight,
+    private static func text(_ string: String, typeface: Typeface, width: Int, height: Int, size: Double, weight: NSFont.Weight,
                              color: CGColor, y: Double, tracking: Double = 0.05) -> CGImage? {
         guard let context = makeContext(width, height) else { return nil }
-        draw(string, in: context, width: width, size: size, weight: weight, color: color, y: y, tracking: tracking)
+        draw(string, typeface: typeface, in: context, width: width, size: size, weight: weight, color: color, y: y, tracking: tracking)
         return context.makeImage()
     }
 
     /// Points on a grid that fall on the letters, bottom-left origin.
-    private static func sample(_ string: String, width: Int, height: Int, size: Double, step: Double) -> [(Double, Double)] {
+    private static func sample(_ string: String, typeface: Typeface, width: Int, height: Int, size: Double,
+                               step: Double) -> [(Double, Double)] {
         var pixels = [UInt8](repeating: 0, count: width * height * 4)
         let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
             guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
                                           bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                           bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-            draw(string, in: context, width: width, size: size, weight: .medium, color: CGColor(gray: 1, alpha: 1),
+            draw(string, typeface: typeface, in: context, width: width, size: size, weight: .medium, color: CGColor(gray: 1, alpha: 1),
                  y: Double(height) / 2, tracking: 0.05)
             return true
         }

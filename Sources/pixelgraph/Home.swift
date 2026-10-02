@@ -29,6 +29,10 @@ final class App {
         case scanHere(URL, count: Int)
         case folder(URL)
         case settings(changed: Int)
+        /// A quick part of the library: the last 7 or 30 days, or since your last scan.
+        case range(Source, title: String, detail: String)
+        /// Photos that have waited long enough in PGDuplicates and PGJunk to delete.
+        case empty(count: Int, days: Int)
     }
 
     private enum Screen: Equatable {
@@ -52,6 +56,10 @@ final class App {
     private var monthCounts: [Date: Int] = [:]
     /// q was pressed: "Quit PixelGraph?" is showing.
     private var confirmingQuit = false
+    /// ? was pressed: this screen's keys are showing; any key closes them.
+    private var showingKeys = false
+    /// Empty… was chosen: what would be deleted, waiting for d.
+    private var emptying: (photos: [String], files: [URL])?
     /// The unfinished review a new scan would replace, shown as a warning.
     private var replacing: Run?
     /// How far each folder, album and month has got; pinned folder paths.
@@ -84,10 +92,33 @@ final class App {
                 draw()
                 continue
             }
+            if showingKeys {
+                showingKeys = false
+                draw()
+                continue
+            }
+            if let due = emptying {
+                switch key {
+                case .char("d"), .click where ui.sheetClick(key) == .button(danger: true):
+                    emptying = nil
+                    await empty(due)
+                case .click where ui.sheetClick(key) == .inside, .resize: break
+                case .escape, .backspace, .char("n"), .char("q"), .quit, .click: emptying = nil
+                default: break
+                }
+                draw()
+                continue
+            }
             if confirmingQuit {
                 switch key {
                 case .enter, .char("y"), .char("q"), .quit: return
-                case .escape, .backspace, .char("n"), .click: confirmingQuit = false
+                case .click(let row, let col):
+                    switch ui.sheetClick(row: row, col: col) {
+                    case .button: return
+                    case .outside: confirmingQuit = false
+                    case .inside: break
+                    }
+                case .escape, .backspace, .char("n"): confirmingQuit = false
                 default: break
                 }
                 draw()
@@ -105,6 +136,9 @@ final class App {
                 case .escape, .backspace:
                     choosing = nil
                     replacing = nil
+                case .click(let row, let col) where ui.sheetClick(row: row, col: col) == .outside:
+                    choosing = nil
+                    replacing = nil
                 case .quit, .char("q"): confirmingQuit = true
                 default: break
                 }
@@ -119,13 +153,15 @@ final class App {
                     if try await resume() == .quit { return }
                 case .settings:
                     openSettings()
+                case .empty:
+                    await prepareEmpty()
                 }
             }
             draw()
         }
     }
 
-    private enum Action { case quit, scan(Source), resume, settings }
+    private enum Action { case quit, scan(Source), resume, settings, empty }
 
     /// Opens "What should PixelGraph do?", starting from Settings, noting any
     /// review it would replace and anything already done with this source.
@@ -150,7 +186,7 @@ final class App {
         let before = settings.graphics
         settings = SettingsScreen(ui: ui).show()
         if settings.graphics != before {
-            ui.sharp = settings.graphics.sharp
+            ui.graphics = settings.graphics.resolved
             ui.forgetImages()
         }
         options = flags.scanner(settings)
@@ -195,6 +231,21 @@ final class App {
             for entry in recentPhotos.prefix(3) {
                 rows.append(.source(entry.source, detail: "\(entry.photos) photos · last scan: \(entry.groups) group\(entry.groups == 1 ? "" : "s")"))
             }
+            // Quick ranges: recent photos, and everything since your last scan of the library.
+            let day: TimeInterval = 86_400
+            for days in [7, 30] {
+                let from = Calendar.current.startOfDay(for: Date.now.addingTimeInterval(-Double(days - 1) * day))
+                rows.append(.range(.dates(from: from, to: nil), title: "Last \(days) days",
+                                   detail: "\(Library.count(from: from).formatted()) photos"))
+            }
+            let libraryScans = recents.filter { entry in
+                if case .album = entry.source { return false }
+                return entry.source.isPhotos
+            }
+            if let last = libraryScans.map(\.date).max(), last < Date.now.addingTimeInterval(-day) {
+                rows.append(.range(.dates(from: last, to: nil), title: "Since your last scan",
+                                   detail: "from \(last.formatted(.dateTime.day().month(.abbreviated))) · \(Library.count(from: last).formatted()) photos"))
+            }
             let shown = Set(recentPhotos.map(\.source))
             for album in Library.albums().prefix(8) where !shown.contains(.album(id: album.id, title: album.title)) {
                 rows.append(.source(.album(id: album.id, title: album.title), detail: "\(album.count.formatted()) photos"))
@@ -216,11 +267,18 @@ final class App {
 
         rows.append(.heading(""))
         rows.append(.heading("FOLDERS AND DRIVES"))
-        if let path = db?.state("last-folder"), fm.fileExists(atPath: path), !pins.contains(path) {
+        // Each folder once: pinned, then "Back to", then recent scans.
+        var listed = Set(pins)
+        if let path = db?.state("last-folder"), fm.fileExists(atPath: path), !listed.contains(path) {
             let url = URL(fileURLWithPath: path)
             rows.append(.browse(url, title: "Back to “\(url.lastPathComponent)”", detail: "where you left off"))
+            listed.insert(path)
         }
-        for entry in recents.filter({ !$0.source.isPhotos }).prefix(4) {
+        let recentFolders = recents.filter { entry in
+            guard case .folder(let path) = entry.source else { return false }
+            return !listed.contains(URL(fileURLWithPath: path).resolvingSymlinksInPath().path)
+        }
+        for entry in recentFolders.prefix(4) {
             rows.append(.source(entry.source, detail: "\(entry.source.kind.lowercased()) · \(entry.groups) group\(entry.groups == 1 ? "" : "s")"))
         }
         for volume in externalVolumes() {
@@ -234,6 +292,9 @@ final class App {
         rows.append(.browse(pictures, title: "Pictures", detail: "browse folders"))
         rows.append(.choose)
         rows.append(.heading(""))
+        let days = settings.int(.emptyDays)
+        let waiting = Staged.older(than: days).count
+        if waiting > 0 { rows.append(.empty(count: waiting, days: days)) }
         rows.append(.settings(changed: settings.changed))
     }
 
@@ -329,6 +390,9 @@ final class App {
             if case .browser(let url) = screen { return .scan(.folder(url)) }
         case .char(","): return .settings
         case .char("p"): togglePin()
+        case .char("?"): showingKeys = true
+        case .home: selected = rows.firstIndex(where: isSelectable) ?? selected
+        case .end: selected = rows.lastIndex(where: isSelectable) ?? selected
         default: break
         }
         return nil
@@ -439,6 +503,8 @@ final class App {
         case .scanHere(let url, _): return opening ? nil : .scan(.folder(url))
         case .choose: prompt = ""
         case .settings: return .settings
+        case .range(let source, _, _): return opening ? nil : .scan(source)
+        case .empty: return .empty
         }
         return nil
     }
@@ -462,6 +528,9 @@ final class App {
         switch key {
         case .escape, .quit:
             prompt = nil
+            return nil
+        case .click(let row, let col):
+            if ui.sheetClick(row: row, col: col) == .outside { prompt = nil }
             return nil
         case .backspace:
             if !text.isEmpty { text.removeLast() }
@@ -527,6 +596,7 @@ final class App {
             return .home
         }
         if case .folder(let path) = source { remember(URL(fileURLWithPath: path)) }
+        let started = Date.now
         ui.term.write(ui.clear())
         let scanner = Scanner(source: source, options: options, fullScreen: true)
         ui.term.allowInterrupt(true)
@@ -548,13 +618,26 @@ final class App {
         stop.cancel()
         ui.term.allowInterrupt(false)
 
-        guard !run.groups.isEmpty else {
-            message = ui.green("✓") + " No near-identical photos in \(source)."
+        guard !run.allGroups.isEmpty else {
+            message = ui.green("✓") + " Nothing to tidy in \(source): no lookalikes, junk or documents."
             screen = .home
             load()
             return .home
         }
-        try? await Task.sleep(for: .milliseconds(700))
+        // A long scan may have been left to run: ring, and ask the terminal to say so.
+        if Date.now.timeIntervalSince(started) > 20 {
+            ui.term.write("\u{07}\u{1B}]9;PixelGraph finished scanning \(source.description.filter { $0.isLetter || $0.isNumber || " ,–-".contains($0) })\u{07}")
+        }
+        // What was found stays on screen; enter goes on to review it.
+        ui.term.drainInput()
+        ui.term.write(ui.barLine(ui.rows, ui.spread(ui.hints("enter review it · esc back to the start screen"), ui.button("enter Review"),
+                                                    width: ui.cols - 4)))
+        guard waitToReview() else {
+            message = ui.green("✓") + " Scanned \(source) · “Continue reviewing” picks it up when you're ready"
+            screen = .home
+            load()
+            return .home
+        }
         ui.forgetImages()
         let outcome = try await ReviewSession(run: run, ui: ui).show()
         screen = .home
@@ -577,13 +660,18 @@ final class App {
     /// Moving the selection repaints just the two rows involved and the
     /// action bar; anything else repaints the screen.
     private func draw() {
+        if ui.tooSmall {
+            ui.term.write(ui.tooSmallScreen())
+            drawnFrame = nil
+            return
+        }
         let visible = max(1, ui.rows - listTop - 3)
         if selected < scroll { scroll = selected }
         if selected >= scroll + visible { scroll = selected - visible + 1 }
-        let key = "\(screen) \(scroll) \(rows.count) \(ui.cols)x\(ui.rows) \(prompt ?? "-") \(message ?? "-") \(choosing != nil) \(taskCursor) \(options.documents) \(options.describe) \(ticked.count) \(confirmingQuit)"
+        let key = "\(screen) \(scroll) \(rows.count) \(ui.cols)x\(ui.rows) \(prompt ?? "-") \(message ?? "-") \(choosing != nil) \(taskCursor) \(options.documents) \(options.describe) \(ticked.count) \(confirmingQuit) \(showingKeys) \(emptying != nil)"
 
         var out: String
-        if key == drawnFrame, prompt == nil, choosing == nil, !confirmingQuit {
+        if key == drawnFrame, prompt == nil, choosing == nil, !confirmingQuit, !showingKeys, emptying == nil {
             out = rowLine(drawnSelected) + rowLine(selected)
         } else {
             out = ui.clear()
@@ -621,6 +709,8 @@ final class App {
                     ui.dim("↑↓ choose · space tick · enter start · esc back"),
                 ], width: 82)
             }
+            if showingKeys { out += keysSheet() }
+            if let due = emptying { out += emptySheet(due) }
             if confirmingQuit {
                 let width = min(ui.cols - 2, 64) - 4
                 out += ui.sheet([ui.bold("Quit PixelGraph?"), ""]
@@ -645,6 +735,72 @@ final class App {
         drawnSelected = selected
     }
 
+    /// ?: the keys for this screen.
+    private func keysSheet() -> String {
+        func row(_ key: String, _ text: String) -> String { ui.blue(key.padding(toLength: 10, withPad: " ", startingAt: 0)) + text }
+        var lines = [ui.bold("Keys"), "", row("↑ ↓", "choose (home and end: first and last)"), row("enter", "scan it, or open it"),
+                     row("→ ←", "open a folder · go back")]
+        switch screen {
+        case .months:
+            lines += [row("space", "tick a month, or a whole year"), row("x", "tick every month from the last one ticked"),
+                      row("c", "clear the ticks"), row("enter", "scan what's ticked")]
+        case .browser:
+            lines += [row("s", "scan this folder, subfolders included"), row("p", "pin a folder to the start screen")]
+        case .home:
+            lines += [row("p", "pin a folder to the top (again to unpin)")]
+        }
+        lines += [row(",", "settings"), row("q", "quit"), "", ui.dim("any key to close")]
+        return ui.sheet(lines, width: 64)
+    }
+
+    /// Empty…: what has waited long enough in PGDuplicates and PGJunk, to confirm.
+    private func prepareEmpty() async {
+        let days = settings.int(.emptyDays)
+        guard let due = try? await Empty.due(olderThan: days, photos: photosAllowed), !(due.photos.isEmpty && due.files.isEmpty) else {
+            message = ui.dim("Nothing has waited \(days) days in PGDuplicates or PGJunk any more.")
+            reload()
+            return
+        }
+        emptying = due
+    }
+
+    private func empty(_ due: (photos: [String], files: [URL])) async {
+        do {
+            let deleted = try await Empty.delete(photos: due.photos, files: due.files)
+            message = ui.green("✓") + " Deleted \(deleted.photos) photos and \(deleted.files) files"
+                + ui.dim(" · photos stay in Recently Deleted for 30 days, files in the Trash")
+        } catch {
+            message = ui.red("Couldn't delete: \(error.localizedDescription)")
+        }
+        drawnFrame = nil
+        reload()
+    }
+
+    private func emptySheet(_ due: (photos: [String], files: [URL])) -> String {
+        let width = min(ui.cols - 2, 64) - 4
+        func count(_ n: Int, _ what: String) -> String { "\(n) \(what)\(n == 1 ? "" : "s")" }
+        var what: [String] = []
+        if !due.photos.isEmpty { what.append(count(due.photos.count, "photo") + " from your library") }
+        if !due.files.isEmpty { what.append(count(due.files.count, "file")) }
+        var lines = [ui.bold("Delete what has waited \(settings.int(.emptyDays))+ days?"), ""]
+        lines += ui.wrap(what.joined(separator: " and ") + " in PGDuplicates or PGJunk. Photos go to Recently Deleted for 30 days "
+                         + "(macOS asks first); files go to the Trash. Anything you've taken back out stays.", width: width, lines: 4)
+            .map { ui.dim($0) }
+        lines += ["", ui.spread("", ui.dim("esc Cancel   ") + ui.dangerButton("d Delete \(due.photos.count + due.files.count)"), width: width)]
+        return ui.sheet(lines, width: 68)
+    }
+
+    /// After a scan: enter (or a click) reviews it, esc goes back to the start screen.
+    private func waitToReview() -> Bool {
+        while true {
+            switch ui.term.nextKey() {
+            case .enter, .char(" "), .click: return true
+            case .escape, .backspace, .char("q"), .quit: return false
+            default: continue
+            }
+        }
+    }
+
     /// One list row, highlighted when selected, covering the full width so
     /// a previous highlight never shows through.
     private func rowLine(_ index: Int) -> String {
@@ -666,6 +822,8 @@ final class App {
         case .browse, .folder, .months: action = ui.button("Open")
         case .resume: action = ui.button("Continue")
         case .settings: action = ui.button("Open settings")
+        case .range(_, let title, _): action = ui.button("Scan \(title.lowercased())")
+        case .empty: action = ui.button("Empty…")
         default: action = ""
         }
         let backHint = screen == .home ? "" : " · ← back"
@@ -673,10 +831,10 @@ final class App {
         if case .browser = screen { scanHint = " · s scan this folder" } else { scanHint = "" }
         let pinHint = rows.indices.contains(selected) && folderURL(rows[selected]) != nil ? " · p pin" : ""
         // The bar lines up with the column above it.
-        var hints = "↑↓ choose · enter \(screen == .home ? "scan" : "open")\(scanHint)\(pinHint)\(backHint) · , settings · q quit"
-        var short = "↑↓ · enter\(backHint) · , settings · q"
+        var hints = "↑↓ choose · enter \(screen == .home ? "scan" : "open")\(scanHint)\(pinHint)\(backHint) · , settings · q quit · ? keys"
+        var short = "↑↓ · enter\(backHint) · , settings · ? keys"
         if screen == .months, rows.indices.contains(selected) {
-            hints = "↑↓ choose · space tick · x tick range · c clear · enter scan · ← back · q quit"
+            hints = "↑↓ choose · space tick · x tick range · c clear · enter scan · ← back · ? keys"
             short = "space tick · x range · enter scan"
             if !ticked.isEmpty {
                 let photos = ticked.reduce(0) { $0 + (monthCounts[$1] ?? 0) }
@@ -692,7 +850,7 @@ final class App {
         let text = ui.visibleWidth(hints) <= room ? hints : short
         // The bar runs the full width; its text lines up with the column above.
         return ui.barLine(ui.rows, String(repeating: " ", count: max(0, left - 3))
-            + ui.spread(ui.dim(ui.clip(text, max(0, room))), action, width: columnWidth))
+            + ui.spread(ui.clip(ui.hints(text), max(0, room)), action, width: columnWidth))
     }
 
     /// "✓ reviewed · 12 Sep" for the latest of these places' progress, or "".
@@ -727,7 +885,9 @@ final class App {
             let start = monthStart(row)
             let box = start.map(ticked.contains) == true ? ui.green("[✓]") : ui.dim("[ ]")
             let name = start.map { Self.monthName.string(from: $0) } ?? source.description
-            return ui.spread("    " + box + " " + name, detail("\(count.formatted()) photos", status(source.places)), width: width)
+            // A bar per month, against the busiest one, to see where the photos are.
+            let bar = ProgressBoard.bar(Double(count) / Double(max(1, monthCounts.values.max() ?? 1)), width: 8)
+            return ui.spread("    " + box + " " + name, bar + "  " + detail("\(count.formatted()) photos", status(source.places)), width: width)
         case .browse(let url, let title, let text):
             return ui.spread(title, detail(text, status(url)), width: width)
         case .choose:
@@ -740,6 +900,10 @@ final class App {
             return ui.spread(url.lastPathComponent + ui.dim("  ›"), detail(pinned, status(url)), width: width)
         case .settings(let changed):
             return ui.spread("Settings…", ui.dim(changed == 0 ? "all defaults" : "\(changed) changed"), width: width)
+        case .range(_, let title, let text):
+            return ui.spread(title, ui.dim(text), width: width)
+        case .empty(let count, let days):
+            return ui.spread("Empty PGDuplicates and PGJunk…", ui.amber("\(count) waited \(days)+ days"), width: width)
         }
     }
 }

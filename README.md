@@ -29,9 +29,9 @@ pixelgraph
 
 In iTerm2, Ghostty, kitty and WezTerm, PixelGraph opens with a short title: a field of out-of-focus lights racks into focus and becomes the name. Any key skips it; `--no-intro` or `PIXELGRAPH_NO_INTRO=1` turns it off.
 
-Choose where your photos are — an album, a month of your library, a folder, a drive or iCloud Drive — and PixelGraph scans it, then opens the review. On the months screen, Space ticks a month (or a whole year), X ticks every month from the last one you ticked, C clears the ticks, and Enter scans just the ticked months, even ones far apart. Ticks are kept for next time.
+Choose where your photos are — an album, a month of your library, a folder, a drive or iCloud Drive — and PixelGraph scans it, with one bar for the whole scan; when it's done, Enter opens the review (Esc keeps it for later, under "Continue reviewing"). If a scan took a while, the terminal rings and, where it can, shows a notification. Under the Photos library, "Last 7 days", "Last 30 days" and "Since your last scan" scan just those photos. On the months screen, each month has a bar for how many photos it holds; Space ticks a month (or a whole year), X ticks every month from the last one you ticked, C clears the ticks, and Enter scans just the ticked months, even ones far apart. Ticks are kept for next time.
 
-Every folder, album and month shows how far it got, with the latest step and its date: `✓ scanned · 3 Sep`, `✓ opened`, `✓ reviewed` (every group looked at) or `✓ moved 34`. Choosing one that's been done before says so, and Enter scans it again. P pins the highlighted folder to the top of the home screen (P again unpins), and "Back to …" reopens the folder you were last in. Press `,` for Settings.
+Every folder, album and month shows how far it got, with the latest step and its date: `✓ scanned · 3 Sep`, `✓ reviewed` (every group looked at) or `✓ moved 34`. Each folder is listed once. Choosing one that's been done before says so, and Enter scans it again. P pins the highlighted folder to the top of the home screen (P again unpins), and "Back to …" reopens the folder you were last in. When photos have waited long enough in PGDuplicates or PGJunk, "Empty PGDuplicates and PGJunk…" appears near the bottom: it shows what would go and deletes only on D. Press `,` for Settings and `?` for the keys on any screen.
 
 ```
 pixelgraph scan --album "Japan 2025"         # an Apple Photos album
@@ -45,7 +45,7 @@ pixelgraph eval                              # how PixelGraph did against your r
 
 ### Reviewing
 
-Every photo is **Keep** or **Move**. The best shot in each group is kept (★); everything else starts selected to move, with the reason shown — "blurrier", "near-exact copy", "eyes closed". Most of the time you only confirm.
+Every photo is **Keep** or **Move**. The best shot in each group is kept (★); everything else starts selected to move (→), with the reason shown — "blurrier", "near-exact copy", "eyes closed". Most of the time you only confirm: on the groups screen, A accepts every group PixelGraph is sure about (exact copies, and shots well behind a clean best) and takes you to the first one that needs a look. The move button shows how much the selection takes up.
 
 One key means one thing on every screen, and keys set a state rather than toggling it, so pressing twice can't undo what you meant:
 
@@ -58,17 +58,22 @@ One key means one thing on every screen, and keys set a state rather than toggli
 | K | keep this photo (on a group: keep them all) |
 | X | move this photo (on a group: all but the best) |
 | B | make it the best ★ |
-| A | select every photo in the group; the next K, X, R or M applies to all of them (Esc clears) |
+| A | on the groups: accept every clear group as PixelGraph chose · in a group: select every photo, and the next K, X, R or M applies to all of them (Esc clears) |
 | R | say why it's moving |
 | C | compare two photos side by side: ← → change the candidate, ↑ pins it |
+| Z | while looking closer or comparing: zoom in on the faces, to check eyes · again for the whole photo |
 | O | show the photo in Finder (Photos library photos open in Photos) |
-| M | move the selection to PGDuplicates, or D in the sheet to delete it — always asks first |
+| M | move the selection to PGDuplicates, or D in the sheet (the red button) to delete it — always asks first |
 | Tab | switch between Duplicates (junk groups at the end) and Documents |
+| ] [ | the next or previous group still to review (no ✓) |
+| 1–9 | in a group: go straight to that photo |
+| I | in a group: show or hide the tags, time and scores under each photo |
+| Home End | the first or last group, or photo |
 | U | undo the last change or move |
 | ? | all the keys |
 | Q | quit — asks first, here and on the start screen; everything is saved as you go |
 
-In iTerm2 photos are shown as real images; other true-colour terminals get colour-block previews.
+In iTerm2, WezTerm, kitty and Ghostty photos are shown as real images; other true-colour terminals get colour-block previews. Photos selected to move are shown muted, not darkened, so they're still easy to judge. Clicking a sheet's button does what it says; clicking outside a sheet closes it.
 
 ### Documents
 
@@ -214,7 +219,7 @@ Scan in parts — an album, a month, a folder. Results are cached, so rescans ar
 
 ### Settings
 
-Press `,` on the home screen (or run `pixelgraph settings`) to change how PixelGraph works. ↑↓ choose, ←→ change, Enter types a value, `d` sets one back to its default, `D` (shift-d) sets them all. Changes show in amber with a * until you press `s` to save; leaving with unsaved changes asks whether to save or discard them. A blue ● marks what differs from the default. `pixelgraph settings --list` prints them all.
+Press `,` on the home screen (or run `pixelgraph settings`) to change how PixelGraph works. ↑↓ choose, ←→ change, Enter types a value, `d` sets one back to its default, and the last row, “Set every setting back to its default”, sets them all. Changes show in amber with a * until you press `s` to save; leaving with unsaved changes asks whether to save or discard them. A blue ● marks what differs from the default. In terminals that show real photos, highlighting Font shows the opening title in that font. `pixelgraph settings --list` prints them all.
 
 | Section | Setting | Default |
 |---|---|---|
@@ -231,11 +236,11 @@ Press `,` on the home screen (or run `pixelgraph settings`) to change how PixelG
 | | Crooked from | 6° |
 | | Old screenshots after | 30 days |
 | | Find accidental · blurry · crooked · bad exposure · smudged · old screenshots · forwarded · low quality | all On |
-| Moving | Enter in the move sheet | PGDuplicates (or Delete) |
-| | Describe kept photos | On |
-| Display | Photos | auto (iterm, blocks) |
+| Moving | Describe kept photos | On |
+| Display | Photos | auto (iterm, kitty, blocks) |
 | | Theme | auto (light, dark) |
 | | Opening title | On |
+| | Font (opening title, report headings) | SF Mono (SF Pro, Avenir Next, Futura, New York) |
 | Nightly clean-up | Run every night · At | Off · 02:00 |
 | | Photos from the last · Move at most | 30 days · 300 |
 | | Then ask (assistant) | none (claude, codex, opencode) |

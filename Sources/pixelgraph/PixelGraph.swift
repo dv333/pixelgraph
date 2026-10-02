@@ -134,7 +134,7 @@ struct Scan: AsyncParsableCommand {
         let run = try await scanner.run()
         stop.cancel()
 
-        if !noReview, isatty(STDIN_FILENO) != 0, !run.groups.isEmpty {
+        if !noReview, isatty(STDIN_FILENO) != 0, !run.allGroups.isEmpty {
             try await ReviewSession(run: run).show()
         } else {
             print("\nReview with `pixelgraph review`, or open the report with `pixelgraph report`.")
@@ -147,7 +147,7 @@ struct Scan: AsyncParsableCommand {
 struct Review: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Review the last scan: keep the best, move the rest.")
 
-    @Option(help: "auto, iterm (sharp photos in iTerm2) or blocks (coloured blocks, any true-colour terminal). Default: Settings.")
+    @Option(help: "auto, iterm (sharp photos in iTerm2, WezTerm), kitty (kitty, Ghostty) or blocks (coloured blocks, any true-colour terminal). Default: Settings.")
     var graphics: TerminalImage.Mode?
 
     @Option(help: .hidden)
@@ -170,8 +170,8 @@ struct Review: AsyncParsableCommand {
             runFile = Paths.nightlyRun
         }
         let run = try Run.load(from: runFile)
-        guard !run.groups.isEmpty else {
-            print("The last scan found no near-identical photos.")
+        guard !run.allGroups.isEmpty else {
+            print("The last scan found nothing to review: no lookalikes, junk or documents.")
             return
         }
         if run.source?.isPhotos ?? true, folder == nil { try await Library.requestAccess() }

@@ -1,5 +1,44 @@
+import AppKit
 import Darwin
 import Foundation
+
+/// The typeface for what PixelGraph draws itself: the opening title and the
+/// web report's headings. Text on the screens is the terminal's own font.
+/// All five come with macOS, so nothing has to be installed.
+enum Typeface: String, CaseIterable, Sendable {
+    /// Matches the terminal: each letter of the title gets its own column of lights.
+    case sfMono = "SF Mono"
+    case sfPro = "SF Pro"
+    case avenirNext = "Avenir Next"
+    case futura = "Futura"
+    case newYork = "New York"
+
+    /// The typeface at `size` and `weight`, or the nearest weight it has
+    /// (Futura's lightest is Medium).
+    func font(size: Double, weight: NSFont.Weight) -> NSFont {
+        let system = NSFont.systemFont(ofSize: size, weight: weight)
+        switch self {
+        case .sfMono: return NSFont.monospacedSystemFont(ofSize: size, weight: weight)
+        case .sfPro: return system
+        case .newYork:
+            return system.fontDescriptor.withDesign(.serif).flatMap { NSFont(descriptor: $0, size: size) } ?? system
+        case .avenirNext, .futura:
+            let descriptor = NSFontDescriptor(fontAttributes: [.family: rawValue, .traits: [NSFontDescriptor.TraitKey.weight: weight]])
+            return NSFont(descriptor: descriptor, size: size) ?? system
+        }
+    }
+
+    /// The same typeface for the report, with fallbacks for browsers that don't know it.
+    var css: String {
+        switch self {
+        case .sfMono: #"ui-monospace, "SF Mono", Menlo, monospace"#
+        case .sfPro: #"-apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif"#
+        case .avenirNext: #""Avenir Next", Avenir, -apple-system, system-ui, sans-serif"#
+        case .futura: #"Futura, "Avenir Next", -apple-system, system-ui, sans-serif"#
+        case .newYork: #"ui-serif, "New York", Charter, Georgia, serif"#
+        }
+    }
+}
 
 /// Colours that stay readable on both light and dark terminals, in the
 /// style of OpenCode: a purple accent on light backgrounds and a blue one on
@@ -27,6 +66,8 @@ enum Theme {
     static var selection: RGB { light ? (234, 234, 236) : (42, 42, 44) }
     /// Text on the accent: white on purple, near-black on blue (both above 5:1).
     static var onAccent: RGB { light ? (255, 255, 255) : (12, 12, 12) }
+    /// Text on red, for the delete button: white on light, near-black on dark (both above 5:1).
+    static var onRed: RGB { light ? (255, 255, 255) : (12, 12, 12) }
 
     static func fg(_ c: RGB) -> String { "\u{1B}[38;2;\(c.r);\(c.g);\(c.b)m" }
     static func bg(_ c: RGB) -> String { "\u{1B}[48;2;\(c.r);\(c.g);\(c.b)m" }
