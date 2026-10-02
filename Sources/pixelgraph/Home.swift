@@ -18,7 +18,7 @@ final class App {
     private enum Row {
         case heading(String)
         /// The last scan, still being reviewed.
-        case resume(scope: String, detail: String)
+        case resume(scope: String, waiting: Int, reviewed: Int, groups: Int)
         case source(Source, detail: String)
         case months(total: Int)
         /// A year on the months screen; ticking it ticks all its months.
@@ -33,10 +33,13 @@ final class App {
         case range(Source, title: String, detail: String)
         /// Photos that have waited long enough in PGDuplicates and PGJunk to delete.
         case empty(count: Int, days: Int)
+        /// Rows that open a screen of their own.
+        case albums(count: Int)
+        case folders
     }
 
     private enum Screen: Equatable {
-        case home, months
+        case home, months, albums, folders
         case browser(URL)
     }
 
@@ -205,6 +208,8 @@ final class App {
         switch screen {
         case .home: loadHome(db)
         case .months: loadMonths()
+        case .albums: loadAlbums()
+        case .folders: loadFolders(db)
         case .browser(let url): loadFolder(url)
         }
         selected = rows.firstIndex(where: isSelectable) ?? 0
@@ -218,85 +223,97 @@ final class App {
         if rows.indices.contains(keep), isSelectable(rows[keep]) { (selected, scroll) = (keep, keepScroll) }
     }
 
+    /// The start screen, in the order you'd want it: the review you're in
+    /// the middle of, something new to scan, pinned folders, recent scans.
+    /// Albums, months and folders each have a screen of their own.
     private func loadHome(_ db: Database?) {
-        if let last = try? Run.load(), last.source != nil, last.waiting > 0 {
-            rows.append(.heading("PICK UP WHERE YOU LEFT OFF"))
-            rows.append(.resume(scope: last.scope, detail: "\(last.waiting) waiting · \(last.reviewedGroups) of \(last.allGroups.count) groups looked at"))
+        let last = (try? Run.load()).flatMap { $0.source != nil && $0.waiting > 0 ? $0 : nil }
+        if let last {
+            rows.append(.resume(scope: last.scope, waiting: last.waiting, reviewed: last.reviewedGroups, groups: last.allGroups.count))
             rows.append(.heading(""))
         }
         let recents = Recents.all()
-        rows.append(.heading("PHOTOS LIBRARY · iCloud Photos"))
+
+        rows.append(.heading("NEW SCAN"))
         if photosAllowed {
-            let recentPhotos = recents.filter { $0.source.isPhotos }
-            for entry in recentPhotos.prefix(3) {
-                rows.append(.source(entry.source, detail: "\(entry.photos) photos · last scan: \(entry.groups) group\(entry.groups == 1 ? "" : "s")"))
-            }
-            // Quick ranges: recent photos, and everything since your last scan of the library.
             let day: TimeInterval = 86_400
             for days in [7, 30] {
                 let from = Calendar.current.startOfDay(for: Date.now.addingTimeInterval(-Double(days - 1) * day))
-                rows.append(.range(.dates(from: from, to: nil), title: "Last \(days) days",
-                                   detail: "\(Library.count(from: from).formatted()) photos"))
+                rows.append(.range(.dates(from: from, to: nil), title: "Last \(days) days", detail: Self.photos(Library.count(from: from))))
             }
             let libraryScans = recents.filter { entry in
                 if case .album = entry.source { return false }
                 return entry.source.isPhotos
             }
-            if let last = libraryScans.map(\.date).max(), last < Date.now.addingTimeInterval(-day) {
-                rows.append(.range(.dates(from: last, to: nil), title: "Since your last scan",
-                                   detail: "from \(last.formatted(.dateTime.day().month(.abbreviated))) · \(Library.count(from: last).formatted()) photos"))
+            if let since = libraryScans.map(\.date).max(), since < Date.now.addingTimeInterval(-day) {
+                rows.append(.range(.dates(from: since, to: nil), title: "Since your last scan, \(since.formatted(.dateTime.month(.abbreviated).day()))",
+                                   detail: Self.photos(Library.count(from: since))))
             }
-            let shown = Set(recentPhotos.map(\.source))
-            for album in Library.albums().prefix(8) where !shown.contains(.album(id: album.id, title: album.title)) {
-                rows.append(.source(.album(id: album.id, title: album.title), detail: "\(album.count.formatted()) photos"))
-            }
+            rows.append(.albums(count: Library.albums().count))
             rows.append(.months(total: Library.totalCount()))
         } else {
-            rows.append(.heading("  No access to Photos · allow it in System Settings → Privacy & Security → Photos"))
+            rows.append(.heading("Photos access is off: System Settings → Privacy & Security → Photos"))
         }
+        rows.append(.folders)
 
-        let fm = FileManager.default
-        let pinned = pins.filter { fm.fileExists(atPath: $0) }.map { URL(fileURLWithPath: $0) }
+        let pinned = pins.filter { FileManager.default.fileExists(atPath: $0) }.map { URL(fileURLWithPath: $0) }
         if !pinned.isEmpty {
             rows.append(.heading(""))
             rows.append(.heading("PINNED"))
-            for url in pinned {
-                rows.append(.browse(url, title: url.lastPathComponent, detail: Self.shortPath(url.deletingLastPathComponent())))
-            }
+            for url in pinned { rows.append(.browse(url, title: url.lastPathComponent, detail: "")) }
         }
 
-        rows.append(.heading(""))
-        rows.append(.heading("FOLDERS AND DRIVES"))
-        // Each folder once: pinned, then "Back to", then recent scans.
-        var listed = Set(pins)
-        if let path = db?.state("last-folder"), fm.fileExists(atPath: path), !listed.contains(path) {
-            let url = URL(fileURLWithPath: path)
-            rows.append(.browse(url, title: "Back to “\(url.lastPathComponent)”", detail: "where you left off"))
-            listed.insert(path)
+        // Scans lately, newest first, each once: not the review above, not pinned folders.
+        let recent = recents.filter { entry in
+            if entry.source == last?.source { return false }
+            if case .folder(let path) = entry.source { return !pins.contains(URL(fileURLWithPath: path).resolvingSymlinksInPath().path) }
+            return true
         }
-        let recentFolders = recents.filter { entry in
-            guard case .folder(let path) = entry.source else { return false }
-            return !listed.contains(URL(fileURLWithPath: path).resolvingSymlinksInPath().path)
+        if !recent.isEmpty {
+            rows.append(.heading(""))
+            rows.append(.heading("RECENT"))
+            for entry in recent.prefix(5) { rows.append(.source(entry.source, detail: Self.photos(entry.photos))) }
         }
-        for entry in recentFolders.prefix(4) {
-            rows.append(.source(entry.source, detail: "\(entry.source.kind.lowercased()) · \(entry.groups) group\(entry.groups == 1 ? "" : "s")"))
-        }
-        for volume in externalVolumes() {
-            rows.append(.browse(volume, title: volume.lastPathComponent, detail: "external drive"))
-        }
-        let iCloud = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
-        if FileManager.default.fileExists(atPath: iCloud.path) {
-            rows.append(.browse(iCloud, title: "iCloud Drive", detail: "browse folders"))
-        }
-        let pictures = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures")
-        rows.append(.browse(pictures, title: "Pictures", detail: "browse folders"))
-        rows.append(.choose)
+
         rows.append(.heading(""))
         let days = settings.int(.emptyDays)
         let waiting = Staged.older(than: days).count
         if waiting > 0 { rows.append(.empty(count: waiting, days: days)) }
         rows.append(.settings(changed: settings.changed))
     }
+
+    /// Every album, to scan one.
+    private func loadAlbums() {
+        for album in Library.albums() {
+            rows.append(.source(.album(id: album.id, title: album.title), detail: Self.photos(album.count)))
+        }
+        if rows.isEmpty { rows.append(.heading("No albums in your library")) }
+    }
+
+    /// Where folders of photos are: where you were, drives, this Mac.
+    private func loadFolders(_ db: Database?) {
+        let fm = FileManager.default
+        if let path = db?.state("last-folder"), fm.fileExists(atPath: path) {
+            let url = URL(fileURLWithPath: path)
+            rows.append(.browse(url, title: "Back to “\(url.lastPathComponent)”", detail: ""))
+            rows.append(.heading(""))
+        }
+        let drives = externalVolumes()
+        if !drives.isEmpty {
+            rows.append(.heading("DRIVES"))
+            for volume in drives { rows.append(.browse(volume, title: volume.lastPathComponent, detail: "")) }
+            rows.append(.heading(""))
+        }
+        rows.append(.heading("ON THIS MAC"))
+        let home = fm.homeDirectoryForCurrentUser
+        let iCloud = home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs")
+        if fm.fileExists(atPath: iCloud.path) { rows.append(.browse(iCloud, title: "iCloud Drive", detail: "")) }
+        rows.append(.browse(home.appendingPathComponent("Pictures"), title: "Pictures", detail: ""))
+        rows.append(.choose)
+    }
+
+    /// "1 photo", "18,019 photos".
+    static func photos(_ n: Int) -> String { "\(n.formatted()) photo\(n == 1 ? "" : "s")" }
 
     /// A folder's path with ~ for home.
     static func shortPath(_ url: URL) -> String {
@@ -305,7 +322,6 @@ final class App {
     }
 
     private func loadMonths() {
-        rows.append(.heading("ALL PHOTOS, BY MONTH"))
         monthCounts = [:]
         let months = Library.months()
         let years = Dictionary(grouping: months) { Calendar.current.component(.year, from: $0.start) }
@@ -505,6 +521,12 @@ final class App {
         case .settings: return .settings
         case .range(let source, _, _): return opening ? nil : .scan(source)
         case .empty: return .empty
+        case .albums:
+            screen = .albums
+            load()
+        case .folders:
+            screen = .folders
+            load()
         }
         return nil
     }
@@ -512,7 +534,7 @@ final class App {
     private func back() {
         switch screen {
         case .home: return
-        case .months: screen = .home
+        case .months, .albums, .folders: screen = .home
         case .browser(let url):
             let parent = url.deletingLastPathComponent()
             let home = FileManager.default.homeDirectoryForCurrentUser
@@ -677,8 +699,10 @@ final class App {
             out = ui.clear()
             let title: String
             switch screen {
-            case .home: title = ui.bold("PixelGraph") + ui.dim("  ·  find near-identical photos and keep the best")
-            case .months: title = ui.bold("Photos library") + ui.dim("  ·  choose a month")
+            case .home: title = ui.bold("PixelGraph")
+            case .months: title = ui.bold("Months and years")
+            case .albums: title = ui.bold("Albums")
+            case .folders: title = ui.bold("Folders and drives")
             case .browser(let url): title = ui.bold(url.lastPathComponent) + ui.dim("  ·  " + url.deletingLastPathComponent().path)
             }
             out += ui.at(listTop - 2, left) + ui.clip(title, columnWidth)
@@ -746,8 +770,10 @@ final class App {
                       row("c", "clear the ticks"), row("enter", "scan what's ticked")]
         case .browser:
             lines += [row("s", "scan this folder, subfolders included"), row("p", "pin a folder to the start screen")]
-        case .home:
+        case .home, .folders:
             lines += [row("p", "pin a folder to the top (again to unpin)")]
+        case .albums:
+            break
         }
         lines += [row(",", "settings"), row("q", "quit"), "", ui.dim("any key to close")]
         return ui.sheet(lines, width: 64)
@@ -819,20 +845,29 @@ final class App {
         switch rows.indices.contains(selected) ? rows[selected] : .choose {
         case .source(let source, _), .month(let source, _): action = ui.button("Scan \(ui.fit(source.description, 28))")
         case .scanHere(let url, _): action = ui.button("Scan \(ui.fit(url.lastPathComponent, 28))")
-        case .browse, .folder, .months: action = ui.button("Open")
+        case .browse, .folder, .months, .albums, .folders: action = ui.button("Open")
         case .resume: action = ui.button("Continue")
         case .settings: action = ui.button("Open settings")
         case .range(_, let title, _): action = ui.button("Scan \(title.lowercased())")
         case .empty: action = ui.button("Empty…")
         default: action = ""
         }
+        // What enter does for the highlighted row, in the bar's own words.
+        let verb: String
+        switch rows.indices.contains(selected) ? rows[selected] : .choose {
+        case .resume: verb = "continue"
+        case .source, .month, .range, .scanHere, .year: verb = "scan"
+        case .empty: verb = "empty"
+        case .choose: verb = "choose"
+        default: verb = "open"
+        }
         let backHint = screen == .home ? "" : " · ← back"
         let scanHint: String
         if case .browser = screen { scanHint = " · s scan this folder" } else { scanHint = "" }
         let pinHint = rows.indices.contains(selected) && folderURL(rows[selected]) != nil ? " · p pin" : ""
         // The bar lines up with the column above it.
-        var hints = "↑↓ choose · enter \(screen == .home ? "scan" : "open")\(scanHint)\(pinHint)\(backHint) · , settings · q quit · ? keys"
-        var short = "↑↓ · enter\(backHint) · , settings · ? keys"
+        var hints = "↑↓ choose · enter \(verb)\(scanHint)\(pinHint)\(backHint) · , settings · q quit · ? keys"
+        var short = "↑↓ · enter \(verb)\(backHint) · ? keys"
         if screen == .months, rows.indices.contains(selected) {
             hints = "↑↓ choose · space tick · x tick range · c clear · enter scan · ← back · ? keys"
             short = "space tick · x range · enter scan"
@@ -853,57 +888,75 @@ final class App {
             + ui.spread(ui.clip(ui.hints(text), max(0, room)), action, width: columnWidth))
     }
 
-    /// "✓ reviewed · 12 Sep" for the latest of these places' progress, or "".
+    /// How far these places got, for the status column: "Scanned Oct 2"
+    /// quietly, and in green once something was done ("Moved 34 · Oct 2").
     private func status(_ places: [String]) -> String {
         guard let latest = places.compactMap({ statuses[$0] }).max(by: { $0.date < $1.date }) else { return "" }
-        return ui.green("✓ ") + ui.dim(latest.text)
+        return latest.acted ? ui.green(latest.label) : ui.dim(latest.label)
     }
 
     private func status(_ url: URL) -> String { status(Source.folder(url).places) }
 
-    /// A row's detail, then its progress when there is any.
-    private func detail(_ text: String, _ status: String) -> String {
-        status.isEmpty ? ui.dim(text) : text.isEmpty ? status : ui.dim(text) + "   " + status
+    /// A row in three columns that start at the same place on every row:
+    /// what it is, how many photos, and how far it got. Rows that open
+    /// another screen end in ›. `accessory` sits at the end of the name
+    /// column (the bar on each month). Narrow windows keep name and count.
+    private func columns(_ name: String, _ count: String = "", _ status: String = "", opens: Bool = false,
+                         accessory: String = "", width: Int) -> String {
+        let countWidth = 13, statusWidth = width >= 80 ? 20 : 16, chevron = 2
+        let nameWidth = width - countWidth - statusWidth - chevron - 2
+        guard nameWidth >= 12 else { return ui.spread(name + (opens ? ui.dim(" ›") : ""), count, width: width) }
+        var left = ui.clip(name, accessory.isEmpty ? nameWidth : nameWidth - ui.visibleWidth(accessory) - 1)
+        if !accessory.isEmpty { left = ui.spread(left, accessory, width: nameWidth) }
+        let shown = ui.clip(status, statusWidth)
+        return left + String(repeating: " ", count: max(1, nameWidth + countWidth - ui.visibleWidth(left) - ui.visibleWidth(count))) + count
+            + "  " + shown + String(repeating: " ", count: max(0, statusWidth - ui.visibleWidth(shown))) + (opens ? ui.dim(" ›") : "  ")
     }
 
     private func render(_ row: Row, width: Int) -> String {
         switch row {
-        case .heading(let text): return ui.dim(text)
-        case .resume(let scope, let detail):
-            return ui.spread(ui.bold("Continue reviewing ") + scope, ui.dim(detail), width: width)
+        case .heading(let text): return ui.dim(ui.clip(text, width))
+        case .resume(let scope, let waiting, let reviewed, let groups):
+            let bar = ProgressBoard.bar(Double(reviewed) / Double(max(1, groups)), width: 8)
+            return columns(ui.bold("Continue reviewing") + " " + scope, ui.dim("\(waiting.formatted()) waiting"),
+                           bar + ui.dim(" \(reviewed) of \(groups)"), width: width)
         case .source(let source, let text):
-            return ui.spread(source.description, detail(text, status(source.places)), width: width)
+            return columns(source.description, ui.dim(text), status(source.places), width: width)
+        case .range(_, let title, let text):
+            return columns(title, ui.dim(text), width: width)
+        case .albums(let count):
+            return columns("Albums", ui.dim("\(count) album\(count == 1 ? "" : "s")"), opens: true, width: width)
         case .months(let total):
-            return ui.spread("All photos, by month…", ui.dim("\(total.formatted()) photos"), width: width)
+            return columns("Months and years", ui.dim(Self.photos(total)), opens: true, width: width)
+        case .folders:
+            return columns("Folders and drives", opens: true, width: width)
         case .year(let year, let months, let count):
             let all = months.allSatisfy(ticked.contains), some = months.contains(where: ticked.contains)
             let box = all ? ui.green("[✓]") : some ? ui.green("[–]") : ui.dim("[ ]")
             let done = months.filter { statuses[Source.monthPlace($0)] != nil }.count
-            let progress = done == 0 ? "" : ui.green("✓ ") + ui.dim("\(done) of \(months.count) months")
-            return ui.spread(box + " " + ui.bold(String(year)), detail("\(count.formatted()) photos", progress), width: width)
+            let progress = done == 0 ? "" : ui.dim("\(done) of \(months.count) months scanned")
+            return columns(box + " " + ui.bold(String(year)), ui.dim(Self.photos(count)), progress, width: width)
         case .month(let source, let count):
             let start = monthStart(row)
             let box = start.map(ticked.contains) == true ? ui.green("[✓]") : ui.dim("[ ]")
             let name = start.map { Self.monthName.string(from: $0) } ?? source.description
             // A bar per month, against the busiest one, to see where the photos are.
             let bar = ProgressBoard.bar(Double(count) / Double(max(1, monthCounts.values.max() ?? 1)), width: 8)
-            return ui.spread("    " + box + " " + name, bar + "  " + detail("\(count.formatted()) photos", status(source.places)), width: width)
+            return columns("    " + box + " " + name, ui.dim(Self.photos(count)), status(source.places), accessory: bar, width: width)
         case .browse(let url, let title, let text):
-            return ui.spread(title, detail(text, status(url)), width: width)
+            return columns(title, ui.dim(text), status(url), opens: true, width: width)
         case .choose:
             return ui.dim("Choose another folder…")
         case .scanHere(let url, let count):
-            let here = count > 0 ? "\(count) images here, plus subfolders" : "includes subfolders"
-            return ui.spread(ui.bold("Scan “\(url.lastPathComponent)”"), detail(here, status(url)), width: width)
+            return columns(ui.bold("Scan “\(url.lastPathComponent)”") + ui.dim(" and its folders"), ui.dim(count > 0 ? "\(count) here" : ""),
+                           status(url), width: width)
         case .folder(let url):
             let pinned = pins.contains(url.resolvingSymlinksInPath().path) ? "pinned" : ""
-            return ui.spread(url.lastPathComponent + ui.dim("  ›"), detail(pinned, status(url)), width: width)
+            return columns(url.lastPathComponent, ui.dim(pinned), status(url), opens: true, width: width)
         case .settings(let changed):
-            return ui.spread("Settings…", ui.dim(changed == 0 ? "all defaults" : "\(changed) changed"), width: width)
-        case .range(_, let title, let text):
-            return ui.spread(title, ui.dim(text), width: width)
+            return columns("Settings", "", ui.dim(changed == 0 ? "All defaults" : "\(changed) changed"), opens: true, width: width)
         case .empty(let count, let days):
-            return ui.spread("Empty PGDuplicates and PGJunk…", ui.amber("\(count) waited \(days)+ days"), width: width)
+            return columns("Empty PGDuplicates and PGJunk…", ui.amber("\(count) waiting"), ui.dim("for \(days)+ days"), width: width)
         }
     }
 }

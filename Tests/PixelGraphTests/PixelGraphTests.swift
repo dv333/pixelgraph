@@ -628,3 +628,13 @@ private func member(_ id: String, sharpness: Float = 0.01, aesthetic: Float = 0)
     #expect(text.contains(ui.blue("k")) && text.contains(ui.blue("← →")) && text.contains(ui.blue("?")))
     #expect(!text.contains(ui.blue("type")))
 }
+
+@Test func libraryRangesAreNamedTheWayPeopleSayThem() {
+    let calendar = Calendar.current
+    func month(_ y: Int, _ m: Int) -> Date { calendar.date(from: DateComponents(year: y, month: m, day: 1))! }
+    #expect(Source.dates(from: month(2025, 12), to: month(2026, 1)).description == month(2025, 12).formatted(.dateTime.month(.wide).year()))
+    #expect(Source.dates(from: month(2023, 1), to: month(2024, 1)).description == "2023")
+    #expect(Source.dates(from: nil, to: nil).description == "All photos")
+    #expect(Source.dates(from: month(2024, 6), to: nil).description.hasPrefix("Since "))
+    #expect(!Source.dates(from: month(2024, 6), to: month(2024, 9)).description.contains("Photos,"))
+}

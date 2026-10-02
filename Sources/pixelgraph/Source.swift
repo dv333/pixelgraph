@@ -18,16 +18,42 @@ enum Source: Codable, Hashable, CustomStringConvertible {
     var description: String {
         switch self {
         case .album(_, let title): return title
-        case .dates(let from, let to):
-            let f = DateFormatter()
-            f.dateFormat = "MMM yyyy"
-            return "Photos, \(from.map(f.string) ?? "start") – \(to.map { f.string(from: $0.addingTimeInterval(-1)) } ?? "now")"
+        case .dates(let from, let to): return Source.name(from: from, to: to)
         case .months(let starts):
-            let f = DateFormatter()
-            f.dateFormat = "MMM yyyy"
-            let parts = Source.runs(starts).map { $0.first == $0.last ? f.string(from: $0.first) : "\(f.string(from: $0.first)) – \(f.string(from: $0.last))" }
-            return "Photos, " + (parts.count <= 2 ? parts.joined(separator: ", ") : parts.prefix(2).joined(separator: ", ") + " +\(parts.count - 2) more")
+            let parts = Source.runs(starts).map { Source.name(from: $0.first, to: Calendar.current.date(byAdding: .month, value: 1, to: $0.last)) }
+            return parts.count <= 2 ? parts.joined(separator: ", ") : parts.prefix(2).joined(separator: ", ") + " +\(parts.count - 2) more"
         case .folder(let path): return (path as NSString).lastPathComponent
+        }
+    }
+
+    /// A part of the library the way people say it: "December 2025",
+    /// "Jun – Aug 2024", "2023", "Since Sep 26", "All photos".
+    static func name(from: Date?, to: Date?) -> String {
+        let calendar = Calendar.current
+        func startsMonth(_ date: Date) -> Bool {
+            let c = calendar.dateComponents([.day, .hour, .minute, .second], from: date)
+            return c.day == 1 && c.hour == 0 && c.minute == 0 && c.second == 0
+        }
+        func month(_ date: Date, year: Bool = true) -> String {
+            date.formatted(year ? .dateTime.month(.abbreviated).year() : .dateTime.month(.abbreviated))
+        }
+        func day(_ date: Date) -> String {
+            calendar.isDate(date, equalTo: .now, toGranularity: .year)
+                ? date.formatted(.dateTime.month(.abbreviated).day()) : date.formatted(.dateTime.month(.abbreviated).day().year())
+        }
+        switch (from, to) {
+        case (nil, nil): return "All photos"
+        case (let from?, nil): return "Since " + (startsMonth(from) ? month(from) : day(from))
+        case (nil, let to?): return "Until " + (startsMonth(to) ? month(to.addingTimeInterval(-1)) : day(to.addingTimeInterval(-1)))
+        case (let from?, let to?):
+            let last = to.addingTimeInterval(-1)
+            guard startsMonth(from), startsMonth(to) else { return "\(day(from)) – \(day(last))" }
+            if calendar.isDate(from, equalTo: last, toGranularity: .month) { return from.formatted(.dateTime.month(.wide).year()) }
+            let sameYear = calendar.isDate(from, equalTo: last, toGranularity: .year)
+            if sameYear, calendar.component(.month, from: from) == 1, calendar.component(.month, from: last) == 12 {
+                return String(calendar.component(.year, from: from))
+            }
+            return sameYear ? "\(month(from, year: false)) – \(month(last))" : "\(month(from)) – \(month(last))"
         }
     }
 

@@ -20,10 +20,24 @@ struct PlaceStatus: Sendable {
     var text: String {
         // Opening a review isn't progress; older notes of it read as the scan they followed.
         let what = step == .moved ? "moved \(moved)" : step == .opened ? "scanned" : step.rawValue
-        let sameYear = Calendar.current.isDate(date, equalTo: .now, toGranularity: .year)
-        let when = sameYear ? date.formatted(.dateTime.day().month(.abbreviated))
-            : date.formatted(.dateTime.day().month(.abbreviated).year())
         return "\(what) · \(when)"
+    }
+
+    /// For the status column: "Scanned 12 Sep", "Reviewed 12 Sep", "Moved 34 · 12 Sep".
+    var label: String {
+        switch step {
+        case .scanned, .opened: return "Scanned \(when)"
+        case .reviewed: return "Reviewed \(when)"
+        case .moved: return "Moved \(moved) · \(when)"
+        }
+    }
+
+    /// Something was done here, not only scanned.
+    var acted: Bool { step == .reviewed || step == .moved }
+
+    private var when: String {
+        Calendar.current.isDate(date, equalTo: .now, toGranularity: .year)
+            ? date.formatted(.dateTime.day().month(.abbreviated)) : date.formatted(.dateTime.day().month(.abbreviated).year())
     }
 }
 
