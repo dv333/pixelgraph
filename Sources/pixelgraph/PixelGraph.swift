@@ -129,6 +129,8 @@ struct Scan: AsyncParsableCommand {
             }
         }
 
+        // The review you were in the middle of waits on the start screen.
+        Reviews.prepareScan(of: source)
         let scanner = Scanner(source: source, options: options.scanner())
         let stop = StopHandler { scanner.board.abandon() }
         let run = try await scanner.run()
@@ -159,9 +161,26 @@ struct Review: AsyncParsableCommand {
     @Option(help: "Open straight on this group, e.g. g3 (lookalikes) or j1 (junk).")
     var group: String?
 
+    @Option(help: "Open the review in progress of this album, folder or part of the library, e.g. --of Banff.")
+    var of: String?
+
     func run() async throws {
         guard isatty(STDIN_FILENO) != 0, isatty(STDOUT_FILENO) != 0 else {
             throw ValidationError("pixelgraph review needs an interactive terminal.")
+        }
+        let aside = Reviews.aside()
+        if let of {
+            // The current review, or one set aside that swaps in.
+            let wanted = of.lowercased()
+            let current = (try? Run.load())?.scope.lowercased()
+            if current.map({ $0.hasPrefix(wanted) }) != true {
+                guard let match = aside.first(where: { $0.scope.lowercased().hasPrefix(wanted) }) else {
+                    throw Agent.Failure("No review in progress of “\(of)”." + Self.inProgress(aside))
+                }
+                try Reviews.resume(match.id)
+            }
+        } else if (try? Run.load()) == nil, !aside.isEmpty, folder == nil, !nightly {
+            throw Agent.Failure("No review is open." + Self.inProgress(aside))
         }
         var reportFolder = folder.map { URL(fileURLWithPath: $0) } ?? Paths.report
         var runFile = folder == nil ? Paths.lastRun : reportFolder.appendingPathComponent("last-run.json")
@@ -176,6 +195,10 @@ struct Review: AsyncParsableCommand {
         }
         if run.source?.isPhotos ?? true, folder == nil { try await Library.requestAccess() }
         try await ReviewSession(run: run, runFile: runFile, folder: reportFolder, graphics: graphics ?? Settings.load().graphics, start: group).show()
+    }
+
+    private static func inProgress(_ aside: [Reviews.Aside]) -> String {
+        aside.isEmpty ? "" : " In progress: " + aside.map(\.scope).joined(separator: ", ") + ". Open one with `pixelgraph review --of <name>`."
     }
 }
 
@@ -204,6 +227,12 @@ struct Undo: AsyncParsableCommand {
             run.unmark(record.ids)
             run.markCaptioned(record.captioned, false)
             try run.save()
+        } else {
+            // The review it came from may be set aside: put its photos back there.
+            Reviews.update(record.source) { run in
+                run.unmark(record.ids)
+                run.markCaptioned(record.captioned, false)
+            }
         }
         if !record.ids.isEmpty { print("Put back \(record.ids.count) photos in \(record.source).") }
         if !record.captioned.isEmpty { print("Put back the old captions on \(record.captioned.count) kept photos.") }

@@ -598,17 +598,16 @@ private func member(_ id: String, sharpness: Float = 0.01, aesthetic: Float = 0)
     #expect(chunks.dropLast().allSatisfy { $0.contains("m=1;") } && chunks.last?.hasPrefix("m=0;") == true)
 }
 
-@Test func clickingASheetsButtonIsTheSameAsItsKey() {
+@Test func clickingAQuestionsButtonIsTheSameAsItsKey() {
     let ui = UI(graphics: .blocks)
-    // Not a terminal, so the screen counts as 80 × 24: the sheet is 60 wide at column 11, rows 10–14.
-    _ = ui.sheet(["Delete them?", "", ui.spread("", ui.dim("esc Cancel   ") + ui.dangerButton("d Delete 3") + "  " + ui.button("enter Move 3"),
-                                             width: 56)], width: 60)
-    // The buttons sit at the end of the last line: " d Delete 3 " then two spaces then " enter Move 3 ".
-    #expect(ui.sheetClick(row: 13, col: 63) == .button(danger: false))
-    #expect(ui.sheetClick(row: 13, col: 50) == .button(danger: true))
-    #expect(ui.sheetClick(row: 11, col: 20) == .inside)
-    #expect(ui.sheetClick(row: 3, col: 3) == .outside)
-    #expect(ui.sheetClick(.char("x")) == nil)
+    // Not a terminal, so the screen counts as 80 × 24: the question takes rows 23 and 24.
+    _ = ui.prompt("Move 3 photos?", note: "Into PGDuplicates", buttons: ui.dangerButton("d Delete") + "  " + ui.button("enter Move 3"))
+    // The buttons end the bar: " d Delete " (columns 53–62), two spaces, " enter Move 3 " (65–78).
+    #expect(ui.promptClick(row: 24, col: 70) == .button(danger: false))
+    #expect(ui.promptClick(row: 24, col: 56) == .button(danger: true))
+    #expect(ui.promptClick(row: 23, col: 20) == .inside)
+    #expect(ui.promptClick(row: 5, col: 5) == .outside)
+    #expect(ui.promptClick(.char("x")) == nil)
 }
 
 @Test func sizesAddUpForTheSelection() {
@@ -637,4 +636,59 @@ private func member(_ id: String, sharpness: Float = 0.01, aesthetic: Float = 0)
     #expect(Source.dates(from: nil, to: nil).description == "All photos")
     #expect(Source.dates(from: month(2024, 6), to: nil).description.hasPrefix("Since "))
     #expect(!Source.dates(from: month(2024, 6), to: month(2024, 9)).description.contains("Photos,"))
+}
+
+@Test func reviewsOfOtherPlacesAreKeptNotReplaced() throws {
+    let fm = FileManager.default
+    func clean() {
+        for url in [Paths.lastRun, Paths.report, Reviews.folder] { try? fm.removeItem(at: url) }
+    }
+    clean()
+    defer { clean() }
+    func review(_ path: String, best: String = "A") throws {
+        var run = Run(date: t0, scope: (path as NSString).lastPathComponent, scanned: 2,
+                      rules: GroupingRules(momentThreshold: 0.5, momentWindow: 600, sceneThreshold: 0.3),
+                      groups: [Run.Group(kind: .copies, photos: [member("A"), member("B")], pick: Pick(best: best, decidedBy: "vision", notes: [:]))])
+        run.source = .folder(path: path)
+        try run.save()
+        try fm.createDirectory(at: Paths.report, withIntermediateDirectories: true)
+        try Data(path.utf8).write(to: Paths.report.appendingPathComponent("which"))
+    }
+    let banff = Source.folder(path: "/photos/Banff"), japan = Source.folder(path: "/photos/Japan")
+
+    // Reviewing Banff, then scanning Japan: Banff waits, previews and all.
+    try review("/photos/Banff")
+    Reviews.prepareScan(of: japan)
+    #expect((try? Run.load()) == nil)
+    #expect(Reviews.aside().map(\.source) == [banff] && Reviews.aside().first?.waiting == 1)
+    try review("/photos/Japan")
+
+    // Going back to Banff swaps it in, and Japan waits instead.
+    try Reviews.resume(Reviews.id(banff))
+    #expect(try Run.load().source == banff)
+    #expect(String(decoding: try Data(contentsOf: Paths.report.appendingPathComponent("which")), as: UTF8.self) == "/photos/Banff")
+    #expect(Reviews.aside().map(\.source) == [japan])
+
+    // Scanning Banff again starts it over: nothing new is set aside; Japan still waits.
+    Reviews.prepareScan(of: banff)
+    #expect(Reviews.aside().map(\.source) == [japan])
+
+    // Undo for a review set aside lands there.
+    #expect(Reviews.update(japan) { $0.markMoved(["B"]) })
+    #expect(Reviews.aside().first?.waiting == 0)
+    #expect(!Reviews.update(.folder(path: "/photos/Nowhere")) { _ in })
+}
+
+@Test func zoomShowsLessAndFillsTheBoxWithoutPassingTheEdges() {
+    let middle = CGPoint(x: 0.5, y: 0.5)
+    // A 4:3 photo in a 2:1 box.
+    #expect(Zoom.crop(zoom: 1, center: middle, aspect: 4.0 / 3, boxAspect: 2) == CGRect(x: 0, y: 0, width: 1, height: 1))
+    let twice = Zoom.crop(zoom: 2, center: middle, aspect: 4.0 / 3, boxAspect: 2)
+    #expect(abs(twice.width - 0.75) < 1e-9 && abs(twice.height - 0.5) < 1e-9)
+    #expect(abs(twice.width * 4 / (twice.height * 3) - 2) < 1e-9)  // shaped like the box
+    // Far right: it stops at the edge.
+    let edge = Zoom.crop(zoom: 2, center: CGPoint(x: 0.99, y: 0.5), aspect: 4.0 / 3, boxAspect: 2)
+    #expect(abs(edge.maxX - 1) < 1e-9)
+    #expect(abs(Zoom.level(showing: twice, aspect: 4.0 / 3, boxAspect: 2) - 2) < 1e-9)
+    #expect(Zoom.label(2) == "2×" && Zoom.label(1.5) == "1.5×")
 }

@@ -88,6 +88,7 @@ final class UI: @unchecked Sendable {
     func red(_ s: String) -> String { Theme.fg(Theme.red) + s + "\u{1B}[39m" }
     func amber(_ s: String) -> String { Theme.fg(Theme.amber) + s + "\u{1B}[39m" }
     func blue(_ s: String) -> String { Theme.fg(Theme.blue) + s + "\u{1B}[39m" }
+    func teal(_ s: String) -> String { Theme.fg(Theme.teal) + s + "\u{1B}[39m" }
     func gray(_ s: String) -> String { Theme.fg(Theme.line) + s + "\u{1B}[39m" }
 
     /// A filled button, like the one primary action on a screen.
@@ -213,49 +214,74 @@ final class UI: @unchecked Sendable {
         return barLine(rows, spread(clip(self.hints(left), max(0, room)), action, width: width - 1))
     }
 
-    /// A centred panel over the current screen, for confirmations and choices.
-    /// One too tall for the window is cut short with "…", so it never covers
-    /// the bottom bar.
-    func sheet(_ lines: [String], width preferred: Int = 60) -> String {
-        let width = min(cols - 2, preferred)
-        let panel = Theme.bg(Theme.panel) + Theme.fg(Theme.panelText)
-        let room = max(2, rows - 4)
-        let lines = lines.count > room ? Array(lines.prefix(room - 1)) + [dim("…")] : lines
-        let top = max(2, (rows - lines.count) / 2), left = (cols - width) / 2 + 1
-        sheetFrame = (top...(top + lines.count + 1), left...(left + width - 1))
-        sheetButtons = []
-        var out = ""
-        for (y, text) in ([""] + lines + [""]).enumerated() {
-            let body = on(Theme.panel, clip(text, width - 4))
-            for columns in buttonColumns(body) {
-                sheetButtons.append((top + y, (left + 2 + columns.range.lowerBound)...(left + 2 + columns.range.upperBound),
-                                     columns.danger))
-            }
-            out += at(top + y, left) + panel + bar() + Theme.fg(Theme.panelText) + " " + body
-                + String(repeating: " ", count: max(0, width - 2 - visibleWidth(body))) + "\u{1B}[0m"
-        }
-        return out
+    /// A question asked in place, never in a box over the screen: the
+    /// bottom two rows become one panel, with `note` (styled; what will
+    /// happen, in a sentence) above and the question, its keys and its
+    /// buttons on the bar. A click on a button is the same as its key; anywhere else, esc.
+    func prompt(_ question: String, note: String = "", keys: String = "esc cancel", buttons: String = "") -> String {
+        let width = cols - 3
+        let left = bold(question) + (keys.isEmpty ? "" : "   " + hints(keys))
+        let line = spread(clip(left, max(0, width - visibleWidth(buttons) - 3)), buttons, width: width - 1)
+        promptRows = (rows - 1)...rows
+        // The bar's text starts in column 3, after the accent bar and a space.
+        promptButtons = buttonColumns(line).map { (rows, ($0.range.lowerBound + 3)...($0.range.upperBound + 3), $0.danger) }
+        return barLine(rows - 1, clip(note, width - 2)) + barLine(rows, line)
     }
 
-    /// Where the last sheet was drawn, and its buttons.
-    private var sheetFrame: (rows: ClosedRange<Int>, cols: ClosedRange<Int>)?
-    private var sheetButtons: [(row: Int, cols: ClosedRange<Int>, danger: Bool)] = []
+    /// Progress in the bottom bar while something runs: what, and how far
+    /// when that's known.
+    func progress(_ detail: String, fraction: Double? = nil) -> String {
+        guard let fraction else { return barLine(rows - 1, "") + barLine(rows, clip(bold(detail), cols - 4)) }
+        let percent = "\(Int((max(0, min(1, fraction)) * 100).rounded()))%"
+        let barWidth = max(8, min(40, cols / 3))
+        return barLine(rows - 1, "") + barLine(rows, spread(clip(bold(detail), max(0, cols - barWidth - 14)),
+                                                             ProgressBoard.bar(fraction, width: barWidth) + "  " + dim(percent), width: cols - 4))
+    }
 
-    enum SheetClick: Equatable { case button(danger: Bool), inside, outside }
+    /// The keys of a screen as a page of its own, in sections, two columns
+    /// when the window is wide enough and one column won't fit.
+    func keysPage(_ title: String, _ sections: [(name: String, keys: [(key: String, does: String)])]) -> String {
+        let width = max(20, min(cols - 4, 96)), left = max(3, (cols - width) / 2 + 1)
+        func block(_ section: (name: String, keys: [(key: String, does: String)])) -> [String] {
+            [dim(section.name.uppercased())] + section.keys.map { blue($0.key.padding(toLength: 13, withPad: " ", startingAt: 0)) + $0.does }
+        }
+        let blocks = sections.map(block)
+        let room = rows - 6
+        let oneColumn = blocks.flatMap { $0 + [""] }.dropLast()
+        var out = clear() + at(2, left) + bold(title)
+        if oneColumn.count <= room || width < 80 {
+            for (n, line) in oneColumn.prefix(room).enumerated() { out += at(4 + n, left) + clip(line, width) }
+        } else {
+            // Sections in order down the first column, then the second.
+            let half = (oneColumn.count + 1) / 2
+            var columns: [[String]] = [[], []]
+            for b in blocks { let c = columns[0].count < half ? 0 : 1; columns[c] += (columns[c].isEmpty ? [] : [""]) + b }
+            let columnWidth = (width - 4) / 2
+            for (c, lines) in columns.enumerated() {
+                for (n, line) in lines.prefix(room).enumerated() { out += at(4 + n, left + c * (columnWidth + 4)) + clip(line, columnWidth) }
+            }
+        }
+        return out + barLine(rows, String(repeating: " ", count: max(0, left - 3)) + hints("any key back"))
+    }
 
-    /// What a click hit on the sheet showing: a button (the red one deletes,
-    /// the other is the same as enter), somewhere else on it (nothing), or
-    /// outside it (the same as esc).
-    func sheetClick(row: Int, col: Int) -> SheetClick {
-        if let hit = sheetButtons.first(where: { $0.row == row && $0.cols.contains(col) }) { return .button(danger: hit.danger) }
-        if let frame = sheetFrame, frame.rows.contains(row), frame.cols.contains(col) { return .inside }
-        return .outside
+    /// Where the question in the bottom bar is, and its buttons.
+    private var promptRows: ClosedRange<Int>?
+    private var promptButtons: [(row: Int, cols: ClosedRange<Int>, danger: Bool)] = []
+
+    enum PromptClick: Equatable { case button(danger: Bool), inside, outside }
+
+    /// What a click hit while a question is in the bar: a button (the red one
+    /// deletes, the other is the same as enter), the rest of the bar
+    /// (nothing), or the screen above it (the same as esc).
+    func promptClick(row: Int, col: Int) -> PromptClick {
+        if let hit = promptButtons.first(where: { $0.row == row && $0.cols.contains(col) }) { return .button(danger: hit.danger) }
+        return promptRows?.contains(row) == true ? .inside : .outside
     }
 
     /// The same for a key; nil when it isn't a click.
-    func sheetClick(_ key: Terminal.Key) -> SheetClick? {
+    func promptClick(_ key: Terminal.Key) -> PromptClick? {
         guard case .click(let row, let col) = key else { return nil }
-        return sheetClick(row: row, col: col)
+        return promptClick(row: row, col: col)
     }
 
     /// The visible columns of the filled buttons in a line of styled text, and which are red.
@@ -285,27 +311,22 @@ final class UI: @unchecked Sendable {
     private typealias Box = (row: Int, col: Int, cols: Int, rows: Int)
 
     /// A photo file drawn into `cols` × `rows` cells, letterboxed, optionally
-    /// muted. `crop` (0 … 1, top-left origin) shows just that part, cut from
-    /// the biggest preview so it stays sharp: how z zooms in on faces.
-    func image(_ url: URL, row: Int, col: Int, cols: Int, rows: Int, dim: Bool, large: Bool = false, crop: CGRect? = nil) -> String {
+    /// muted. Zooming in is `zoomed`.
+    func image(_ url: URL, row: Int, col: Int, cols: Int, rows: Int, dim: Bool, large: Bool = false) -> String {
         guard cols > 0, rows > 0 else { return "" }
-        let key = url.path + (dim ? "|dim" : "") + (crop.map { "|\($0.minX),\($0.minY),\($0.width),\($0.height)" } ?? "")
+        let key = url.path + (dim ? "|dim" : "")
         if let graphics {
             var box: Box = (row, col, cols, rows)
-            if let size = pixelSize(url) {
-                let shown = crop.map { (width: max(1, Int(Double(size.width) * $0.width)), height: max(1, Int(Double(size.height) * $0.height))) } ?? size
-                box = fit(shown, in: box)
-            }
+            if let size = pixelSize(url) { box = fit(size, in: box) }
             // As many pixels as the box really has on screen (Retina included),
             // so the terminal never has to stretch a small picture up.
             let side = boxPixels(cols: box.cols, rows: box.rows)
             let sized = key + "|\(side)|\(graphics)"
             if encoded[sized] == nil {
-                let file = side > 720 || crop != nil ? larger(url) : url
-                if graphics == .iTerm, !dim, large, crop == nil, let data = try? Data(contentsOf: file) {
+                let file = side > 720 ? larger(url) : url
+                if graphics == .iTerm, !dim, large, let data = try? Data(contentsOf: file) {
                     encoded[sized] = data
-                } else if var source = picture(file, maxSide: crop == nil ? side : 2048) {
-                    if let crop, let cut = TerminalImage.crop(source, to: crop) { source = cut }
+                } else if var source = picture(file, maxSide: side) {
                     if dim { source = TerminalImage.darkened(source) ?? source }
                     encoded[sized] = graphics == .kitty ? TerminalImage.png(source) : TerminalImage.jpeg(source)
                 }
@@ -315,14 +336,30 @@ final class UI: @unchecked Sendable {
         }
         let blockKey = key + "|\(cols)x\(rows)"
         if blocks[blockKey] == nil {
-            let file = crop == nil ? url : larger(url)
-            guard var source = picture(file, maxSide: crop != nil ? 2048 : large ? max(cols, rows * 2) * 2 : 480) else {
+            guard let source = picture(url, maxSide: large ? max(cols, rows * 2) * 2 : 480) else {
                 return at(row, col) + self.dim("no preview")
             }
-            if let crop, let cut = TerminalImage.crop(source, to: crop) { source = cut }
             blocks[blockKey] = TerminalImage.blocks(source, cols: cols, rows: rows, dim: dim)
         }
         return blocks[blockKey]!.enumerated().map { at(row + $0.offset, col) + $0.element }.joined()
+    }
+
+    /// Part of a big picture, cut out and drawn to fill the box: how the
+    /// review zooms in. Drawn fresh each time, since every step and move
+    /// shows something different.
+    func zoomed(_ source: CGImage, crop: CGRect, row: Int, col: Int, cols: Int, rows: Int) -> String {
+        guard cols > 0, rows > 0, let cut = TerminalImage.crop(source, to: crop) else { return "" }
+        guard let graphics else {
+            return TerminalImage.blocks(cut, cols: cols, rows: rows).enumerated().map { at(row + $0.offset, col) + $0.element }.joined()
+        }
+        let box = fit((cut.width, cut.height), in: (row, col, cols, rows))
+        // Exactly as many pixels as the box has on screen: fewer keeps each
+        // step quick, and a small cut is enlarged smoothly here rather than
+        // stretched into blocks by the terminal.
+        let side = boxPixels(cols: box.cols, rows: box.rows)
+        let picture = max(cut.width, cut.height) == side ? cut : TerminalImage.scaled(cut, maxSide: side, enlarge: true) ?? cut
+        guard let data = graphics == .kitty ? TerminalImage.png(picture) : TerminalImage.jpeg(picture) else { return "" }
+        return place(data, box)
     }
 
     /// A picture made on the fly (the font preview in Settings), drawn like a

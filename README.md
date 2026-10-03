@@ -29,15 +29,16 @@ pixelgraph
 
 In iTerm2, Ghostty, kitty and WezTerm, PixelGraph opens with a short title: a field of out-of-focus lights racks into focus and becomes the name. Any key skips it; `--no-intro` or `PIXELGRAPH_NO_INTRO=1` turns it off.
 
-The start screen keeps to what you'd do next. At the top, **Continue reviewing** picks up the review you're in the middle of, with how far it's got. **New scan** has Last 7 days, Last 30 days and Since your last scan, then **Albums ›**, **Months and years ›** and **Folders and drives ›** (iCloud Drive, Pictures, drives, "Back to …" the folder you were last in, or any other folder), each a screen of its own. **Pinned** folders come next (P pins the highlighted folder, P again unpins), then **Recent**: your last five scans, each once. Every row lines up in three columns: what it is, how many photos, and how far it got (`Scanned Oct 2`, or in green `Reviewed Oct 2`, `Moved 34 · Oct 2`); rows that open another screen end in ›. Library parts are named the way you'd say them: "December 2025", "Jun – Aug 2024", "Since Sep 26".
+The start screen keeps to what you'd do next. At the top, **Continue reviewing** lists every review you're in the middle of, with how far each has got: scanning somewhere else sets the current review aside instead of replacing it, and picking one brings it back as you left it. Scanning the same place again starts its review over, and a finished review isn't kept. From the command line, `pixelgraph review --of Banff` opens one. **New scan** has Last 7 days, Last 30 days and Since your last scan, then **Albums ›**, **Months and years ›** and **Folders and drives ›** (iCloud Drive, Pictures, drives, "Back to …" the folder you were last in, or any other folder), each a screen of its own. **Pinned** folders come next (P pins the highlighted folder, P again unpins), then **Recent**: your last five scans, each once. Every row lines up in three columns: what it is, how many photos, and how far it got (`Scanned Oct 2`, or in green `Reviewed Oct 2`, `Moved 34 · Oct 2`); rows that open another screen end in ›. Library parts are named the way you'd say them: "December 2025", "Jun – Aug 2024", "Since Sep 26".
 
-PixelGraph scans with one bar for the whole scan; when it's done, Enter opens the review (Esc keeps it for later, under "Continue reviewing"). If a scan took a while, the terminal rings and, where it can, shows a notification. On the months screen, each month has a bar for how many photos it holds; Space ticks a month (or a whole year), X ticks every month from the last one you ticked, C clears the ticks, and Enter scans just the ticked months, even ones far apart. Ticks are kept for next time. Choosing something that's been scanned before says so, and Enter scans it again. When photos have waited long enough in PGDuplicates or PGJunk, "Empty PGDuplicates and PGJunk…" appears near the bottom: it shows what would go and deletes only on D. Press `,` for Settings and `?` for the keys on any screen.
+PixelGraph scans with one bar for the whole scan; when it's done, Enter opens the review (Esc keeps it for later, under "Continue reviewing"). If a scan took a while, the terminal rings and, where it can, shows a notification. On the months screen, each month has a bar for how many photos it holds; Space ticks a month (or a whole year), X ticks every month from the last one you ticked, C clears the ticks, and Enter scans just the ticked months, even ones far apart. Ticks are kept for next time. Enter scans straight away with your Settings; only scanning a place that has a review in progress asks first, in the bottom bar, since that starts it over. Quitting doesn't ask: it says in a line what's still waiting. When photos have waited long enough in PGDuplicates or PGJunk, "Empty PGDuplicates and PGJunk…" appears near the bottom: it shows what would go and deletes only on D. Press `,` for Settings and `?` for the keys on any screen.
 
 ```
 pixelgraph scan --album "Japan 2025"         # an Apple Photos album
 pixelgraph scan --from 2024-06 --to 2024-08  # part of your library
 pixelgraph scan --folder /Volumes/T7/DCIM    # a folder, drive or iCloud Drive folder
 pixelgraph review                            # pick up where you left off
+pixelgraph review --of Banff                 # a review set aside
 pixelgraph report                            # the last scan as a web page
 pixelgraph undo                              # put back the last move
 pixelgraph eval                              # how PixelGraph did against your reviews
@@ -54,16 +55,17 @@ One key means one thing on every screen, and keys set a state rather than toggli
 | ← → ↑ ↓ | move around (mouse wheel and Page Up/Down scroll the groups) |
 | Space | look closer, like Quick Look · again to go back |
 | Enter | open · confirm |
-| Esc | back · cancel — never changes anything; leaving the review asks first |
+| Esc | back · cancel — never changes anything; the review reopens where you left it |
 | K | keep this photo (on a group: keep them all) |
 | X | move this photo (on a group: all but the best) |
 | B | make it the best ★ |
 | A | on the groups: accept every clear group as PixelGraph chose · in a group: select every photo, and the next K, X, R or M applies to all of them (Esc clears) |
 | R | say why it's moving |
 | C | compare two photos side by side: ← → change the candidate, ↑ pins it |
+| + − | on the groups and in a group: bigger or smaller cards and photos, fewer or more a row (0 goes back to the automatic fit; your size is kept for next time). While looking closer or comparing: zoom in and out, up to 8× (the mouse wheel too). Zoomed in, ← → ↑ ↓ or a drag move around, N and P go to the next or previous photo at the same zoom and spot, and 0 shows the whole photo again. Compare zooms both sides together. Zooming uses the full-size photo: a folder's file, or the library's original, fetched from iCloud for just that photo if it isn't on the Mac (not with Stay offline on). When only the 2048-pixel preview can be had, the header says "preview only" |
 | Z | while looking closer or comparing: zoom in on the faces, to check eyes · again for the whole photo |
 | O | show the photo in Finder (Photos library photos open in Photos) |
-| M | move the selection to PGDuplicates, or D in the sheet (the red button) to delete it — always asks first |
+| M | move the selection to PGDuplicates, or D (the red button) to delete it — asked in the bottom bar first |
 | Tab | switch between Duplicates (junk groups at the end) and Documents |
 | ] [ | the next or previous group still to review (no ✓) |
 | 1–9 | in a group: go straight to that photo |
@@ -71,9 +73,9 @@ One key means one thing on every screen, and keys set a state rather than toggli
 | Home End | the first or last group, or photo |
 | U | undo the last change or move |
 | ? | all the keys |
-| Q | quit — asks first, here and on the start screen; everything is saved as you go |
+| Q | quit straight away — everything is saved as you go, and the review reopens where you were |
 
-In iTerm2, WezTerm, kitty and Ghostty photos are shown as real images; other true-colour terminals get colour-block previews. Photos selected to move are shown muted, not darkened, so they're still easy to judge. Clicking a sheet's button does what it says; clicking outside a sheet closes it.
+In iTerm2, WezTerm, kitty and Ghostty photos are shown as real images; other true-colour terminals get colour-block previews. In a group, each photo's frame says what happens to it: green for the best (kept by default), teal for others you keep, red for those moving, grey once moved; the highlighted photo's frame is thick. Photos selected to move are shown muted, not darkened, so they're still easy to judge. Nothing pops up over the screen: a question (move or delete, why it's moving, save your settings) is asked in the bottom two rows, where clicking a button does what it says and clicking anywhere else cancels, and `?` shows the keys as a page of their own.
 
 ### Documents
 
