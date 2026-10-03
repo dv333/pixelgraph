@@ -53,6 +53,8 @@ enum Agent {
     }
 
     static func scan(_ source: Source, into workspace: Workspace, quiet: Bool) async throws -> Run {
+        // A scan by an assistant sets the person's review of somewhere else aside, not over it.
+        if workspace == .main { Reviews.prepareScan(of: source) }
         var options = Settings.load().scanner
         options.describe = false
         options.runFile = workspace.runFile

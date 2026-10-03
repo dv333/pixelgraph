@@ -14,6 +14,8 @@ final class Terminal: @unchecked Sendable {
         case char(Character)
         /// 1-based screen position of a left click.
         case click(row: Int, col: Int)
+        /// Where the mouse is while the left button is held down, to drag.
+        case drag(row: Int, col: Int)
     }
 
     private var original = termios()
@@ -62,8 +64,8 @@ final class Terminal: @unchecked Sendable {
         raw.c_cc.17 = 0  // VTIME
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw)
         lastSize = size
-        // Alternate screen, hide cursor, report mouse clicks (SGR encoding).
-        write("\u{1B}[?1049h\u{1B}[?25l\u{1B}[?1000h\u{1B}[?1006h")
+        // Alternate screen, hide cursor, report mouse clicks and drags (SGR encoding).
+        write("\u{1B}[?1049h\u{1B}[?25l\u{1B}[?1000h\u{1B}[?1002h\u{1B}[?1006h")
     }
 
     /// Lets ctrl-c stop the program (during a scan) or arrive as a key (the rest of the time).
@@ -75,7 +77,7 @@ final class Terminal: @unchecked Sendable {
     }
 
     func leave() {
-        write("\u{1B}[?1000l\u{1B}[?1006l\u{1B}[0m\u{1B}[?25h\u{1B}[?1049l")
+        write("\u{1B}[?1000l\u{1B}[?1002l\u{1B}[?1006l\u{1B}[0m\u{1B}[?25h\u{1B}[?1049l")
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &original)
     }
 
@@ -93,9 +95,14 @@ final class Terminal: @unchecked Sendable {
 
     private var pending: Key?
 
+    /// The last letter as typed, capitals kept: keys arrive lower-case, but
+    /// text being typed (a folder path, a model name) needs what was typed.
+    private(set) var typed: Character?
+
     /// Blocks until a key, click, wheel movement or window resize. Wheel
     /// events that are already waiting are folded into one, so a trackpad
-    /// flick can't queue up scrolling that carries on after it stops.
+    /// flick can't queue up scrolling that carries on after it stops; drag
+    /// events likewise come down to where the mouse is now.
     func nextKey() -> Key {
         let key: Key
         if let waiting = pending {
@@ -103,6 +110,15 @@ final class Terminal: @unchecked Sendable {
             key = waiting
         } else {
             key = readKey()
+        }
+        if case .drag = key {
+            var latest = key
+            while wait(10) {
+                let next = readKey()
+                guard case .drag = next else { pending = next; break }
+                latest = next
+            }
+            return latest
         }
         guard case .scroll(var ticks) = key else { return key }
         while wait(15) {
@@ -132,8 +148,12 @@ final class Terminal: @unchecked Sendable {
             case 0x09: return .tab
             case 0x7F, 0x08: return .backspace
             // Letters arrive lower-case, so Caps Lock never changes what a key does.
-            case 0x41...0x5A: return .char(Character(UnicodeScalar(byte + 32)))
-            case 0x20...0x7E: return .char(Character(UnicodeScalar(byte)))
+            case 0x41...0x5A:
+                typed = Character(UnicodeScalar(byte))
+                return .char(Character(UnicodeScalar(byte + 32)))
+            case 0x20...0x7E:
+                typed = Character(UnicodeScalar(byte))
+                return .char(Character(UnicodeScalar(byte)))
             default: continue
             }
         }
@@ -157,6 +177,7 @@ final class Terminal: @unchecked Sendable {
             guard final == UInt8(ascii: "M"), parts.count == 3 else { return nil }
             switch parts[0] {
             case 0: return .click(row: parts[2], col: parts[1])
+            case 32: return .drag(row: parts[2], col: parts[1])
             case 64: return .scroll(-1)
             case 65: return .scroll(1)
             default: return nil
@@ -272,6 +293,21 @@ enum TerminalImage {
         guard let destination = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(destination, image, nil)
         return CGImageDestinationFinalize(destination) ? data as Data : nil
+    }
+
+    /// The same picture with its long side `maxSide`: smaller, or, with
+    /// `enlarge`, bigger too, smoothly (a terminal stretching a small
+    /// picture itself shows blocks).
+    static func scaled(_ image: CGImage, maxSide: Int, enlarge: Bool = false) -> CGImage? {
+        let ratio = Double(maxSide) / Double(max(image.width, image.height))
+        let scale = enlarge ? ratio : min(1, ratio)
+        let w = max(1, Int(Double(image.width) * scale)), h = max(1, Int(Double(image.height) * scale))
+        guard let context = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        return context.makeImage()
     }
 
     /// The part of `image` inside `rect` (0 … 1, top-left origin).

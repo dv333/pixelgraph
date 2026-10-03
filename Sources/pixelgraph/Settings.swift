@@ -363,7 +363,7 @@ final class SettingsScreen {
             case .char("d"), .char("n"):
                 return true
             case .click(let row, let col):
-                switch ui.sheetClick(row: row, col: col) {
+                switch ui.promptClick(row: row, col: col) {
                 case .button:
                     save()
                     return true
@@ -438,7 +438,7 @@ final class SettingsScreen {
         switch key {
         case .escape, .quit: typing = nil; return
         case .backspace: if !text.isEmpty { text.removeLast() }
-        case .char(let c): text.append(c)
+        case .char(let c): text.append(ui.term.typed ?? c)
         case .enter:
             guard let value = setting.normalized(text) else {
                 toast = ui.red("That doesn't fit “\(setting.title)”.")
@@ -561,24 +561,18 @@ final class SettingsScreen {
         out += ui.barLine(ui.rows, String(repeating: " ", count: max(0, left - 3))
             + ui.spread(ui.clip(ui.hints(hints), max(0, room)), action, width: width))
         if showingKeys {
-            func row(_ key: String, _ text: String) -> String { ui.blue(key.padding(toLength: 10, withPad: " ", startingAt: 0)) + text }
-            out += ui.sheet([
-                ui.bold("Keys"), "",
-                row("↑ ↓", "choose a setting (home and end: first and last)"),
-                row("← →", "change it"),
-                row("enter", "switch, next, or type a value"),
-                row("d", "set it back to its default"),
-                row("s", "save your changes; until then they're amber with a *"),
-                row("esc", "back (asks first if something isn't saved)"),
-                "", ui.dim("any key to close"),
-            ], width: 68)
+            out = ui.keysPage("Settings keys", [
+                ("Choosing", [("↑ ↓", "choose a setting · home and end: first and last"), ("← →", "change it"),
+                              ("enter", "switch, next, or type a value")]),
+                ("Keeping", [("d", "set it back to its default"), ("s", "save; until then changes are amber with a *"),
+                             ("esc", "back; with unsaved changes, asks in the bar first")]),
+            ])
         }
         if confirmingLeave {
-            let w = min(ui.cols - 2, 60) - 4
+            // Asked in the bar: what's unsaved above, the choice below.
             let names = pending.keys.compactMap { Settings.specs[$0]?.title }.sorted().joined(separator: ", ")
-            out += ui.sheet([ui.bold("Save your changes?"), ""]
-                + ui.wrap("\(pending.count) unsaved: \(names).", width: w, lines: 3).map { ui.dim($0) }
-                + ["", ui.spread("", ui.dim("esc Keep editing   d Discard   ") + ui.button("enter Save"), width: w)], width: 64)
+            out += ui.prompt("Save \(pending.count) change\(pending.count == 1 ? "" : "s")?", note: ui.dim("Unsaved: \(names)"),
+                             keys: "d discard · esc keep editing", buttons: ui.button("enter Save"))
         }
         ui.term.write(out)
     }

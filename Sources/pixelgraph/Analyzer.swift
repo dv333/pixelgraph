@@ -134,6 +134,32 @@ enum Analyzer {
     }
 }
 
+/// Zooming in on a photo while looking closer or comparing.
+enum Zoom {
+    /// The steps + and − go through; 1 is the whole photo.
+    static let steps: [Double] = [1, 1.5, 2, 3, 4, 6, 8]
+
+    /// The part of a photo shown at `zoom` around `center` (both 0 … 1,
+    /// top-left origin), for a photo `aspect` wide in a box `boxAspect` wide
+    /// (width ÷ height in pixels). At 1 that's all of it; zoomed in, it
+    /// fills the box once the photo is bigger than the box, and never goes
+    /// past the photo's edges.
+    static func crop(zoom: Double, center: CGPoint, aspect: Double, boxAspect: Double) -> CGRect {
+        let w = min(1, max(1, boxAspect / aspect) / zoom), h = min(1, max(1, aspect / boxAspect) / zoom)
+        return CGRect(x: min(max(0, center.x - w / 2), 1 - w), y: min(max(0, center.y - h / 2), 1 - h), width: w, height: h)
+    }
+
+    /// The zoom at which `crop` (as from `Faces.crop`) fills the box.
+    static func level(showing crop: CGRect, aspect: Double, boxAspect: Double) -> Double {
+        max(1, max(1, boxAspect / aspect) / max(0.01, crop.width))
+    }
+
+    /// "2×", "1.5×".
+    static func label(_ zoom: Double) -> String {
+        zoom == zoom.rounded() ? "\(Int(zoom))×" : String(format: "%.1f×", zoom)
+    }
+}
+
 /// Faces in the photo being looked at, for z (zoom in on the faces).
 enum Faces {
     /// Where the faces are, 0 … 1 with a top-left origin.

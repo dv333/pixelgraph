@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Reviewing a scan: groups first, then the photos in a group, then one photo
@@ -16,7 +17,8 @@ final class ReviewSession {
     private let fromHome: Bool
 
     private enum Screen { case groups, group, photo, compare }
-    private enum Sheet { case reason, confirm(file: [String], duplicates: [String], describe: [String]), help, leave(Outcome), done }
+    /// What's asked in the bottom bar (reason, confirm), or the keys page.
+    private enum Sheet { case reason, confirm(file: [String], duplicates: [String], describe: [String]), help, rescan }
     private enum Overview { case mosaic, filmstrip }
     private enum Hit { case group(Int), photo(Int), more }
 
@@ -27,8 +29,17 @@ final class ReviewSession {
     private var cursor = 0
     /// Compare: the photo held on the left while candidates change on the right.
     private var pinned = 0
-    /// z: looking closer (or comparing) shows just the faces.
-    private var zoomed = false
+    /// Zoom while looking closer or comparing (1 is the whole photo), and
+    /// the middle of what's shown (0 … 1 across and down). Both stay as you
+    /// go from photo to photo, so the same spot can be checked shot by shot.
+    private var zoom = 1.0
+    private var center = CGPoint(x: 0.5, y: 0.5)
+    /// Where a drag on a zoomed photo was last.
+    private var dragFrom: (row: Int, col: Int)?
+    /// The photos on screen at full size, while zoomed in, and which of
+    /// them could only be had as the preview.
+    private var originals: [String: CGImage] = [:]
+    private var previewOnly: Set<String> = []
     /// Faces found in each photo looked at closely, and its width ÷ height.
     private var faceInfo: [String: (boxes: [CGRect], aspect: Double)] = [:]
     private var scroll = 0
@@ -110,10 +121,11 @@ final class ReviewSession {
         ui.enter()
         defer {
             save()
+            savePlace()
             if ownsTerminal {
                 ui.leave()
                 let moving = run.toMove.count
-                print(moving > 0 ? "\(moving) photos still selected to move. Run `pixelgraph review` to finish." : "All done.")
+                print(moving > 0 ? "\(moving) photo\(moving == 1 ? "" : "s") still selected to move. Run `pixelgraph review` to finish." : "All done.")
             }
         }
         // Older scans don't know how big their photos are: look them up once.
@@ -123,18 +135,47 @@ final class ReviewSession {
             run.fillSizes(Dictionary(sizes, uniquingKeysWith: { first, _ in first }))
             dirty = dirty || !sizes.isEmpty
         }
+        restorePlace()
         if let start, let index = groupIndex(start) { open(index) }
         draw()
         while true {
             let key = ui.term.nextKey()
             // The wheel only scrolls the groups; elsewhere it changes nothing,
             // so don't redraw for it.
-            if case .scroll = key, (screen != .groups && screen != .group) || sheet != nil { continue }
+            if case .scroll = key, sheet != nil { continue }
+            // Drags only move a zoomed photo; elsewhere they change nothing.
+            if case .drag = key, !(zoom > 1 && (screen == .photo || screen == .compare)) { continue }
             if let outcome = await handle(key) { return outcome }
             noteSeen()
             announceIfDone()
+            await loadOriginals()
             draw()
         }
+    }
+
+    /// Where you were in this review ("duplicates:12"), kept for next time,
+    /// so leaving it never needs asking about.
+    private var placeKey: String? { run.source.map { "review-place:" + $0.key } }
+
+    private func restorePlace() {
+        let db = Database.open()
+        cardsPerRow = db?.state("review-cards-per-row").flatMap { Int($0) }
+        tilesPerRow = db?.state("review-tiles-per-row").flatMap { Int($0) }
+        guard let key = placeKey, let saved = db?.state(key) else { return }
+        let parts = saved.split(separator: ":")
+        guard parts.count == 2, let index = Int(parts[1]) else { return }
+        let wanted: Tab = parts[0] == "documents" ? .documents : .duplicates
+        guard tabs.contains(wanted) else { return }
+        tab = wanted
+        groupIndex = min(max(0, index), max(0, groups.count - 1))
+    }
+
+    private func savePlace() {
+        let db = Database.open()
+        db?.setState("review-cards-per-row", cardsPerRow.map(String.init))
+        db?.setState("review-tiles-per-row", tilesPerRow.map(String.init))
+        guard let key = placeKey else { return }
+        db?.setState(key, "\(tab == .documents ? "documents" : "duplicates"):\(groupIndex)")
     }
 
     private func save() {
@@ -157,39 +198,20 @@ final class ReviewSession {
         if Date.now.timeIntervalSince(toastSince) > 4 { toast = nil }
         await refreshEdited()
 
-        // Leaving always asks first: a stray Esc or q shouldn't end a long review.
-        if case .leave(let outcome)? = sheet {
+        // q and ctrl-c quit from anywhere, without asking: every choice is
+        // already saved, and the review reopens where you were.
+        if key == .quit || key == .char("q") { return .quit }
+        // R asked "scan it again?" in the bar: enter leaves to do it.
+        if case .rescan? = sheet {
             switch key {
-            case .enter, .char("y"):
+            case .enter, .char("y"), .click where ui.promptClick(key) == .button(danger: false):
                 sheet = nil
-                return outcome
-            case .quit, .char("q"):
-                // q again while asked to quit means yes; on "back home" it asks to quit instead.
-                if outcome == .quit {
-                    sheet = nil
-                    return .quit
-                }
-                sheet = .leave(.quit)
-            case .click(let row, let col):
-                switch ui.sheetClick(row: row, col: col) {
-                case .button:
-                    sheet = nil
-                    return outcome
-                case .outside:
-                    sheet = nil
-                    needsFull = true
-                case .inside: break
-                }
-            case .escape, .backspace, .char("n"):
+                return .rescan
+            case .click where ui.promptClick(key) == .inside, .resize: break
+            default:
                 sheet = nil
                 needsFull = true
-            default: break
             }
-            return nil
-        }
-        // q and ctrl-c ask before quitting, from anywhere.
-        if key == .quit || key == .char("q") {
-            sheet = .leave(.quit)
             return nil
         }
         if let sheet {
@@ -214,6 +236,10 @@ final class ReviewSession {
             case .pageUp: select(groupIndex - page)
             case .home: select(0)
             case .end: select(groups.count - 1)
+            // Bigger cards are fewer a row; 0 goes back to the automatic fit.
+            case .char("+"), .char("="): resizeCards(-1)
+            case .char("-"): resizeCards(1)
+            case .char("0"): cardsPerRow = nil
             case .char("]"), .char("["):
                 if let next = unreviewed(from: groupIndex, step: key == .char("]") ? 1 : -1) { select(next) } else { allReviewed() }
             case .scroll(let ticks):
@@ -231,7 +257,7 @@ final class ReviewSession {
                     toast = ui.dim("This scan is too old to scan again from here; start it from the start screen.")
                     break
                 }
-                sheet = .leave(.rescan)
+                sheet = .rescan
             case .tab:
                 guard tabs.count > 1 else {
                     toast = ui.dim(tab == .documents ? "No lookalikes or junk in this scan." : "No documents in this scan.")
@@ -242,7 +268,7 @@ final class ReviewSession {
                 scroll = 0
                 needsFull = true
             case .char("u"): await undo()
-            case .escape where fromHome: sheet = .leave(.home)
+            case .escape where fromHome: return .home
             case .click(let row, let col):
                 switch hit(row, col) {
                 case .group(let i)?: open(i)
@@ -292,6 +318,9 @@ final class ReviewSession {
             case .scroll(let ticks): cursor = min(max(0, cursor + (ticks > 0 ? perRow : -perRow)), order.count - 1)
             case .home: cursor = 0
             case .end: cursor = order.count - 1
+            case .char("+"), .char("="): resizeTiles(-1)
+            case .char("-"): resizeTiles(1)
+            case .char("0"): tilesPerRow = nil
             case .char("i"):
                 details.toggle()
                 needsFull = true
@@ -322,14 +351,27 @@ final class ReviewSession {
             }
 
         case .photo:
+            let box = photoBox
             switch key {
-            case .left, .up: cursor = (cursor - 1 + order.count) % order.count
-            case .right, .down: cursor = (cursor + 1) % order.count
+            // Zoomed in, the arrows move around the photo; n and p go on to
+            // the next photo at the same zoom and spot.
+            case .left where zoom > 1: pan(-0.25, 0, box)
+            case .right where zoom > 1: pan(0.25, 0, box)
+            case .up where zoom > 1: pan(0, -0.25, box)
+            case .down where zoom > 1: pan(0, 0.25, box)
+            case .click(let row, let col) where zoom > 1: dragFrom = (row, col)
+            case .drag(let row, let col): drag(to: row, col, box)
+            case .char("+"), .char("="): stepZoom(1)
+            case .char("-"): stepZoom(-1)
+            case .char("0"): resetZoom()
+            case .scroll(let ticks) where ticks != 0: stepZoom(ticks < 0 ? 1 : -1)
+            case .left, .up, .char("p"): stepPhoto(-1)
+            case .right, .down, .char("n"): stepPhoto(1)
             case .home: cursor = 0
             case .end: cursor = order.count - 1
             case .char(let c) where ("1"..."9").contains(c):
                 if let n = c.wholeNumberValue, n <= order.count { cursor = n - 1 }
-            case .char("z"): toggleZoom([order[cursor]])
+            case .char("z"): frameFaces(order[cursor], box)
             case .char("c"): openCompare()
             case .char("o"): reveal(order[cursor].id)
             case .char("e"): await editPhotos([order[cursor].id])
@@ -339,16 +381,28 @@ final class ReviewSession {
             case .char("r"): if !pick.moved.contains(order[cursor].id) { sheet = .reason }
             case .escape, .backspace, .enter, .click, .char(" "):
                 screen = .group
-                zoomed = false
+                resetZoom()
             default: break
             }
 
         case .compare:
+            // Both sides zoom and move together, to compare the same spot.
+            let box = compareBox
             switch key {
-            case .right, .down: cursor = nextCandidate(after: cursor, step: 1)
-            case .left: cursor = nextCandidate(after: cursor, step: -1)
+            case .left where zoom > 1: pan(-0.25, 0, box)
+            case .right where zoom > 1: pan(0.25, 0, box)
+            case .up where zoom > 1: pan(0, -0.25, box)
+            case .down where zoom > 1: pan(0, 0.25, box)
+            case .click(let row, let col) where zoom > 1: dragFrom = (row, col)
+            case .drag(let row, let col): drag(to: row, col, box)
+            case .char("+"), .char("="): stepZoom(1)
+            case .char("-"): stepZoom(-1)
+            case .char("0"): resetZoom()
+            case .scroll(let ticks) where ticks != 0: stepZoom(ticks < 0 ? 1 : -1)
+            case .right, .down, .char("n"): stepCandidate(1)
+            case .left, .char("p"): stepCandidate(-1)
             case .up, .tab: swap(&pinned, &cursor)
-            case .char("z"): toggleZoom([order[pinned], order[cursor]])
+            case .char("z"): frameFaces(order[pinned], box)
             case .char("o"): reveal(order[cursor].id)
             case .char("e"): await editPhotos([order[cursor].id])
             case .char("k"): keep(order[cursor].id)
@@ -358,7 +412,7 @@ final class ReviewSession {
             case .char(" "), .enter: screen = .photo
             case .escape, .backspace, .char("c"), .click:
                 screen = .group
-                zoomed = false
+                resetZoom()
             default: break
             }
         }
@@ -377,7 +431,9 @@ final class ReviewSession {
                 needsFull = true
             }
             switch key {
-            case .click(let row, let col) where ui.sheetClick(row: row, col: col) != .outside: break
+            case .click where ui.promptClick(key) == .button(danger: false):
+                apply(forAll ? "other" : pick.suggestions[id] ?? "other")
+            case .click where ui.promptClick(key) == .inside: break
             case .escape, .backspace, .click:
                 sheet = nil
                 allSelected = false
@@ -388,56 +444,142 @@ final class ReviewSession {
                 apply(Inspector.reasons[n - 1])
             default: break
             }
+        case .rescan:
+            break
         case .help:
             sheet = nil
-        case .done:
-            switch key {
-            case .enter, .char("m"), .click where ui.sheetClick(key) == .button(danger: false):
-                screen = .groups
-                askToMove(everything: true)
-                if case .done? = sheet { sheet = nil }
-            case .click where ui.sheetClick(key) == .inside: break
-            case .resize: break
-            default:
-                sheet = nil
-                needsFull = true
-            }
-        case .leave:
-            break
+            needsFull = true
         case .confirm(let file, let duplicates, let describe):
             switch key {
-            case .enter, .char("y"), .char("p"), .click where ui.sheetClick(key) == .button(danger: false):
+            case .enter, .char("y"), .char("p"), .click where ui.promptClick(key) == .button(danger: false):
                 sheet = nil
                 await move(file: file, duplicates: duplicates, to: .duplicates, describe: describe)
-            case .char("d") where !duplicates.isEmpty, .click where ui.sheetClick(key) == .button(danger: true):
+            case .char("d") where !duplicates.isEmpty, .click where ui.promptClick(key) == .button(danger: true):
                 sheet = nil
                 await move(file: file, duplicates: duplicates, to: .trash, describe: describe)
-            case .click where ui.sheetClick(key) == .inside: break
-            case .escape, .backspace, .click, .char("n"): sheet = nil
+            case .click where ui.promptClick(key) == .inside: break
+            case .escape, .backspace, .click, .char("n"):
+                sheet = nil
+                needsFull = true
             default: break
             }
         }
     }
 
-    /// z: in on the faces, or back out to the whole photo. Stays in as you
-    /// go from photo to photo, so the same faces can be checked shot by shot.
-    private func toggleZoom(_ members: [Run.Member]) {
-        zoomed.toggle()
-        guard zoomed, !members.contains(where: { faceCrop($0, cols: 8, rows: 4) != nil }) else { return }
-        zoomed = false
-        toast = ui.dim(members.count == 1 ? "No faces found in this photo" : "No faces found in these photos")
+    /// Where the photo is drawn when looking closer, and each side of compare.
+    private var photoBox: (cols: Int, rows: Int) { (ui.cols - 2, max(4, ui.rows - 7)) }
+    private var compareBox: (cols: Int, rows: Int) { ((ui.cols - 5) / 2 - 2, max(4, ui.rows - 9)) }
+
+    private func boxAspect(_ box: (cols: Int, rows: Int)) -> Double {
+        Double(box.cols) * ui.term.cellAspect / Double(max(1, box.rows))
     }
 
-    /// The part of a photo to show in a box of `cols` × `rows` while zoomed:
-    /// all its faces, with room around them. Nil when not zoomed or no faces.
-    private func faceCrop(_ member: Run.Member, cols: Int, rows: Int) -> CGRect? {
-        guard zoomed, let files = images[member.id] else { return nil }
-        if faceInfo[member.id] == nil {
-            let image = TerminalImage.load(folder.appendingPathComponent(files.full), maxSide: 1024)
-            faceInfo[member.id] = image.map { (Faces.boxes(in: $0), Double($0.width) / Double(max(1, $0.height))) } ?? ([], 1)
+    /// A photo's width ÷ height: from its full-size copy, its preview, or the scan.
+    private func aspect(_ member: Run.Member) -> Double {
+        if let image = originals[member.id] { return Double(image.width) / Double(max(1, image.height)) }
+        if let known = faceInfo[member.id]?.aspect { return known }
+        return Double(max(1, member.width)) / Double(max(1, member.height))
+    }
+
+    /// + and −: the next step in or out; back at 1, the whole photo again.
+    private func stepZoom(_ direction: Int) {
+        let steps = Zoom.steps
+        let here = direction > 0 ? steps.lastIndex { $0 <= zoom + 0.001 } ?? 0 : steps.firstIndex { $0 >= zoom - 0.001 } ?? 0
+        zoom = steps[min(max(0, here + direction), steps.count - 1)]
+        if zoom == 1 { center = CGPoint(x: 0.5, y: 0.5) }
+    }
+
+    private func resetZoom() {
+        zoom = 1
+        center = CGPoint(x: 0.5, y: 0.5)
+        dragFrom = nil
+    }
+
+    /// Moves what's shown by a share of what's on screen (0.25 = a quarter),
+    /// stopping at the photo's edges.
+    private func pan(_ dx: Double, _ dy: Double, _ box: (cols: Int, rows: Int)) {
+        let member = screen == .compare ? order[pinned] : order[cursor]
+        let shown = Zoom.crop(zoom: zoom, center: center, aspect: aspect(member), boxAspect: boxAspect(box))
+        let moved = Zoom.crop(zoom: zoom, center: CGPoint(x: shown.midX + dx * shown.width, y: shown.midY + dy * shown.height),
+                              aspect: aspect(member), boxAspect: boxAspect(box))
+        center = CGPoint(x: moved.midX, y: moved.midY)
+    }
+
+    /// A drag on a zoomed photo moves it with the mouse.
+    private func drag(to row: Int, _ col: Int, _ box: (cols: Int, rows: Int)) {
+        guard zoom > 1 else { return }
+        if let from = dragFrom {
+            pan(-Double(col - from.col) / Double(max(1, box.cols)), -Double(row - from.row) / Double(max(1, box.rows)), box)
         }
-        guard let info = faceInfo[member.id] else { return nil }
-        return Faces.crop(info.boxes, aspect: info.aspect, boxAspect: Double(cols) * ui.term.cellAspect / Double(max(1, rows)))
+        dragFrom = (row, col)
+    }
+
+    /// z: in on the faces of this photo, or, zoomed in already, back out to
+    /// the whole photo.
+    private func frameFaces(_ member: Run.Member, _ box: (cols: Int, rows: Int)) {
+        guard zoom == 1 else { return resetZoom() }
+        let info = faces(member)
+        guard let crop = Faces.crop(info.boxes, aspect: info.aspect, boxAspect: boxAspect(box)) else {
+            toast = ui.dim("No faces found in this photo · + zooms in anywhere")
+            return
+        }
+        zoom = Zoom.level(showing: crop, aspect: info.aspect, boxAspect: boxAspect(box))
+        center = CGPoint(x: crop.midX, y: crop.midY)
+    }
+
+    /// Faces found in a photo's preview, and its width ÷ height.
+    private func faces(_ member: Run.Member) -> (boxes: [CGRect], aspect: Double) {
+        if let known = faceInfo[member.id] { return known }
+        let image = images[member.id].flatMap { TerminalImage.load(folder.appendingPathComponent($0.full), maxSide: 1024) }
+        let info = image.map { (Faces.boxes(in: $0), Double($0.width) / Double(max(1, $0.height))) } ?? ([], 1)
+        faceInfo[member.id] = info
+        return info
+    }
+
+    /// While zoomed in: the photos on screen at full size, so zooming stays
+    /// sharp. A folder's photo is read from its file; a library photo is
+    /// the original, fetched from iCloud for just this photo if it isn't on
+    /// this Mac (unless Settings say stay offline). Whichever is bigger, it
+    /// or the 2048-pixel preview, is used: never a small stand-in. Only
+    /// what's on screen is kept.
+    private func loadOriginals() async {
+        guard zoom > 1, screen == .photo || screen == .compare, !order.isEmpty else { return }
+        let wanted = screen == .photo ? [order[cursor]] : [order[pinned], order[cursor]]
+        let ids = Set(wanted.map(\.id))
+        originals = originals.filter { ids.contains($0.key) }
+        let offline = settings.bool(.offline)
+        for member in wanted where originals[member.id] == nil {
+            let item = Items.lookup([member.id])[member.id]
+            var image: CGImage?
+            switch item?.backing {
+            case .photo(let asset)?:
+                ui.term.write(ui.progress(offline ? "Getting the full-size photo…" : "Getting the full-size photo, from iCloud if need be…"))
+                image = await Library.fullSize(asset, maxSide: 4096, download: !offline)
+            case .file?:
+                image = await item?.image(maxSide: 4096, fetch: offline ? .localOnly : .download(timeout: 30))
+            case nil:
+                // Moved since: what's still at its old path, if anything.
+                if member.id.hasPrefix("file:") { image = TerminalImage.load(URL(fileURLWithPath: String(member.id.dropFirst(5))), maxSide: 4096) }
+            }
+            let preview = images[member.id].flatMap { TerminalImage.load(folder.appendingPathComponent($0.full), maxSide: 2048) }
+            if let full = image, max(full.width, full.height) >= max(preview?.width ?? 0, preview?.height ?? 0) {
+                originals[member.id] = full
+                previewOnly.remove(member.id)
+            } else {
+                originals[member.id] = preview
+                previewOnly.insert(member.id)
+            }
+        }
+    }
+
+    /// A photo in its box: zoomed in from its full-size copy, or whole.
+    private func drawPhoto(_ member: Run.Member, row: Int, col: Int, _ box: (cols: Int, rows: Int)) -> String {
+        if zoom > 1, let source = originals[member.id] {
+            let crop = Zoom.crop(zoom: zoom, center: center, aspect: Double(source.width) / Double(max(1, source.height)), boxAspect: boxAspect(box))
+            return ui.zoomed(source, crop: crop, row: row, col: col, cols: box.cols, rows: box.rows)
+        }
+        guard let files = images[member.id] else { return "" }
+        return ui.image(folder.appendingPathComponent(files.full), row: row, col: col, cols: box.cols, rows: box.rows, dim: false, large: true)
     }
 
     /// Compare starts with the best shot pinned on the left and the photo
@@ -446,13 +588,47 @@ final class ReviewSession {
         guard order.count > 1 else { return }
         pinned = order.firstIndex { pick.keepers.contains($0.id) } ?? 0
         if cursor == pinned { cursor = nextCandidate(after: pinned, step: 1) }
+        if cursor == pinned { cursor = nextCandidate(after: pinned, step: -1) }
         screen = .compare
     }
 
+    /// The photo `step` along from `index`, past the pinned one; `index`
+    /// itself at either end, since the arrows stop there rather than go round.
     private func nextCandidate(after index: Int, step: Int) -> Int {
-        var next = (index + step + order.count) % order.count
-        if next == pinned { next = (next + step + order.count) % order.count }
-        return next
+        var next = index + step
+        if next == pinned { next += step }
+        return order.indices.contains(next) ? next : index
+    }
+
+    /// ← → when looking closer: the next or previous photo, stopping at the
+    /// first and last with a word rather than going round.
+    private func stepPhoto(_ step: Int) {
+        guard order.indices.contains(cursor + step) else {
+            return atEnd(step > 0 ? "That's the last photo in this group" : "That's the first photo in this group")
+        }
+        cursor += step
+        leftEnd()
+    }
+
+    /// ← → in compare: the next or previous candidate, stopping at the ends.
+    private func stepCandidate(_ step: Int) {
+        let next = nextCandidate(after: cursor, step: step)
+        guard next != cursor else { return atEnd(step > 0 ? "That's the last one to compare" : "That's the first one to compare") }
+        cursor = next
+        leftEnd()
+    }
+
+    /// The word said at either end, gone again as soon as you move off it.
+    private var endNote: String?
+
+    private func atEnd(_ text: String) {
+        endNote = ui.dim(text)
+        toast = endNote
+    }
+
+    private func leftEnd() {
+        if toast != nil, toast == endNote { toast = nil }
+        endNote = nil
     }
 
     /// Mouse wheel on the groups: move the view a row at a time, keeping the
@@ -501,7 +677,7 @@ final class ReviewSession {
         select(index)
         order = Run.displayOrder(group)
         cursor = 0
-        zoomed = false
+        resetZoom()
         gridScroll = 0
         seen = []
         allSelected = false
@@ -929,13 +1105,9 @@ final class ReviewSession {
         return (changes.map(\.id), failure)
     }
 
-    /// A sheet with a progress bar, drawn straight away while a move runs.
+    /// Progress in the bottom bar, drawn straight away while a move runs.
     private func showProgress(done: Int, total: Int, detail: String) {
-        let fraction = total == 0 ? 1 : Double(done) / Double(total)
-        let percent = "\(Int((fraction * 100).rounded()))%"
-        let width = min(ui.cols - 2, 60) - 4
-        ui.term.write(ui.sheet([ui.bold(detail), "",
-                                ProgressBoard.bar(fraction, width: max(4, width - percent.count - 2)) + "  " + ui.dim(percent)]))
+        ui.term.write(ui.progress(detail, fraction: total == 0 ? 1 : Double(done) / Double(total)))
     }
 
     /// A lookalike group PixelGraph is sure about: every photo it selected to
@@ -1027,6 +1199,8 @@ final class ReviewSession {
     /// The selected card or tile when the screen was last drawn.
     private var drawnSelection = -1
     private var drawnTitle = ""
+    /// The message on screen when it was last drawn.
+    private var drawnToast: String?
     /// Cards or tiles whose content changed since the last draw.
     private var changed: Set<Int> = []
     /// Set when many things change at once (a move, an undo).
@@ -1036,10 +1210,10 @@ final class ReviewSession {
     private func frameKey() -> String {
         let s: String
         switch screen {
-        case .groups: s = "groups \(overview) \(scroll)"
-        case .group: s = "group \(groupIndex) \(gridScroll) \(allSelected) \(details)"
-        case .photo: s = "photo \(groupIndex) \(cursor) \(zoomed)"
-        case .compare: s = "compare \(groupIndex) \(pinned) \(cursor) \(zoomed)"
+        case .groups: s = "groups \(overview) \(scroll) \(cardsPerRow ?? 0)"
+        case .group: s = "group \(groupIndex) \(gridScroll) \(allSelected) \(details) \(tilesPerRow ?? 0)"
+        case .photo: s = "photo \(groupIndex) \(cursor) \(zoom) \(center)"
+        case .compare: s = "compare \(groupIndex) \(pinned) \(cursor) \(zoom) \(center)"
         }
         return "\(s) \(ui.cols)x\(ui.rows) \(sheet == nil)"
     }
@@ -1064,9 +1238,15 @@ final class ReviewSession {
         if screen == .group { keepGridVisible() }
         if screen == .groups { keepSelectionVisible() }
         let key = frameKey()
-        let partial = !needsFull && sheet == nil && key == drawnFrame && (screen == .groups || screen == .group)
+        // Looking closer or comparing, a key that changes nothing (→ on the
+        // last photo, z without faces) only updates the message: the photo
+        // isn't sent again. A message that's gone needs the line it covered.
+        let still = (screen == .photo || screen == .compare) && changed.isEmpty && !(drawnToast != nil && toast == nil)
+        let partial = !needsFull && sheet == nil && key == drawnFrame && (screen == .groups || screen == .group || still)
         var out: String
-        if partial {
+        if partial, screen == .photo || screen == .compare {
+            out = ""
+        } else if partial {
             out = ""
             for index in changed.union([drawnSelection, selection]) {
                 out += item(index, content: changed.contains(index))
@@ -1085,17 +1265,21 @@ final class ReviewSession {
             }
         }
         out += toastLine()
+        // Questions take the bottom two rows; the keys are a page of their own.
         switch sheet {
-        case .reason: out += reasonSheet()
-        case .confirm(let file, let duplicates, let describe): out += confirmSheet(file: file, duplicates: duplicates, describe: describe)
-        case .help: out += helpSheet()
-        case .done: out += doneSheet()
-        case .leave(let outcome): out += leaveSheet(outcome)
+        case .reason: out += reasonPrompt()
+        case .confirm(let file, let duplicates, let describe): out += confirmPrompt(file: file, duplicates: duplicates, describe: describe)
+        case .help: out = helpPage()
+        case .rescan:
+            out += ui.prompt("Scan \(ui.fit(run.scope, 30)) again, from scratch?",
+                             note: ui.dim("Grouped afresh with your current settings; your choices here are dropped, moved photos stay moved"),
+                             keys: "esc keep this review", buttons: ui.button("enter Scan again"))
         case nil: break
         }
         ui.term.write(out)
         drawnFrame = key
         drawnSelection = selection
+        drawnToast = toast
         changed = []
         needsFull = false
     }
@@ -1135,7 +1319,7 @@ final class ReviewSession {
                                     short: "space open · tab · m file", action: fileButton(run.documentsToFile.count, copies: run.documentCopies.count))
             }
             let selected = groups.flatMap { g in g.photos.map(\.id).filter { g.pick.willMove($0) } }
-            return ui.actionBar(hints: "space open · a accept clear · k keep group · x move rest · m move · u undo" + (tabs.count > 1 ? " · tab next tab" : "") + " · ? keys",
+            return ui.actionBar(hints: "space open · a accept clear · k keep group · x move rest · m move · u undo · + − size" + (tabs.count > 1 ? " · tab next tab" : "") + " · ? keys",
                                 short: "space open · ? keys", action: moveButton(selected))
         default:
             let movingIDs = group.photos.map(\.id).filter { pick.willMove($0) }
@@ -1145,7 +1329,7 @@ final class ReviewSession {
                 return ui.actionBar(hints: "space look · d file · k keep here · x duplicate · c compare · u undo · esc back",
                                     short: "d file · k keep · x dup · esc", action: fileButton(filing, copies: moving))
             }
-            return ui.actionBar(hints: "space look · k keep · x move · b best · a all · c compare · e edit · o show in Finder · u undo · esc back · ? keys",
+            return ui.actionBar(hints: "space look · k keep · x move · b best · a all · c compare · + − size · e edit · o show in Finder · u undo · esc back · ? keys",
                                 short: "k keep · x move · ? keys", action: moveButton(movingIDs, label: "Move \(moving)"))
         }
     }
@@ -1168,7 +1352,8 @@ final class ReviewSession {
         let photos = groups.reduce(0) { $0 + $1.photos.count }
         let reviewed = groups.filter { $0.reviewed == true }.count
         let counted = tab == .documents ? "\(groups.count) documents"
-            : junkCount > 0 ? "\(run.groups.count) groups + \((run.junkGroups ?? []).count) junk" : "\(groups.count) groups"
+            : junkCount > 0 ? "\(run.groups.count) group\(run.groups.count == 1 ? "" : "s") + \((run.junkGroups ?? []).count) junk"
+            : "\(groups.count) group\(groups.count == 1 ? "" : "s")"
         var left = ui.bold(run.scope) + ui.dim(" · \(counted) · \(photos) photos")
         if tabs.count > 1 {
             let on = { [ui] (text: String) in ui.bold("[" + text + "]") }
@@ -1237,6 +1422,13 @@ final class ReviewSession {
     private func mosaicLayout() -> MosaicLayout {
         let n = groups.count
         let available = ui.rows - 4  // header, gap, "more" line, action bar
+        if let forced = cardsPerRow {
+            // A size chosen with + and −: this many cards a row, scrolling for the rest.
+            let perRow = min(max(1, forced), mostCards)
+            let width = min(140, (ui.cols - 2 - (perRow - 1) * 3) / perRow)
+            let imageRows = max(4, min(((width - 2) * 2 / 3) * 3 / 8, available - 5))
+            return MosaicLayout(perRow: perRow, cardWidth: width, imageRows: imageRows, visibleRows: max(1, available / (imageRows + 5)))
+        }
         var showsAll: (layout: MosaicLayout, area: Int)?
         var fallback: MosaicLayout?
         for perRow in 1...8 {
@@ -1426,10 +1618,12 @@ final class ReviewSession {
             if let url = thumb(member) {
                 out += ui.image(url, row: strip, col: c, cols: layout.thumbWidth, rows: layout.thumbRows, dim: !kept)
             }
-            // A rule under each: green best, white kept, blue moving.
+            // A rule under each, in the same colours as a group's frames:
+            // green best, teal kept, red moving, grey moved.
             let rule = String(repeating: "▔", count: layout.thumbWidth)
             out += ui.at(strip + layout.thumbRows, c)
-                + (g.pick.keepers.contains(member.id) ? ui.green(rule) : kept ? rule : g.pick.moved.contains(member.id) ? ui.gray(rule) : ui.blue(rule))
+                + (g.pick.keepers.contains(member.id) ? ui.green(rule) : kept ? ui.teal(rule)
+                   : g.pick.moved.contains(member.id) ? ui.gray(rule) : ui.red(rule))
         }
         return out
     }
@@ -1441,9 +1635,25 @@ final class ReviewSession {
         /// Rows each tile takes besides its photo: frame, captions, gap.
         var extra = 7
 
-        init(count n: Int, cols: Int, rows: Int, extra: Int = 7) {
+        /// The most tiles a row holds and stays readable.
+        static func most(cols: Int) -> Int { max(1, cols / 14) }
+
+        init(count n: Int, cols: Int, rows: Int, extra: Int = 7, perRow forced: Int? = nil) {
             self.extra = extra
             let available = rows - 4
+            if let forced {
+                // A size chosen with + and −: this many a row, as big as that
+                // allows (one row always fits), scrolling for the rest.
+                perRow = min(max(1, forced), Self.most(cols: cols))
+                tileWidth = min(160, (cols - 2 - (perRow - 1) * 2) / perRow)
+                imageRows = max(3, (tileWidth - 2) * 3 / 8)
+                if imageRows > available - extra {
+                    imageRows = max(3, available - extra)
+                    tileWidth = min(tileWidth, imageRows * 8 / 3 + 2)
+                }
+                visible = min(n, max(1, available / (imageRows + extra)) * perRow)
+                return
+            }
             var best: (perRow: Int, width: Int, imageRows: Int)?
             for perRow in 1...max(1, min(n, 8)) {
                 var width = min(60, (cols - 2 - (perRow - 1) * 2) / perRow)
@@ -1476,17 +1686,29 @@ final class ReviewSession {
     private func label(_ state: State, number: Int) -> String {
         if tab == .documents {
             switch state {
-            case .best: return ui.blue(" \(number) → PGDocuments ")
-            case .keep: return " \(number) Keep here "
-            case .move: return ui.dim(" \(number) → Move ")
+            case .best: return ui.green(" \(number) → PGDocuments ")
+            case .keep: return ui.teal(" \(number) Keep here ")
+            case .move: return ui.red(" \(number) → Move ")
             case .moved: return ui.dim(" \(number) Moved ")
             }
         }
         switch state {
         case .best: return ui.green(" \(number) ★ Best ")
-        case .keep: return " \(number) Keep "
-        case .move: return ui.blue(" \(number) → Move ")
+        case .keep: return ui.teal(" \(number) Keep ")
+        case .move: return ui.red(" \(number) → Move ")
         case .moved: return ui.dim(" \(number) Moved ")
+        }
+    }
+
+    /// What happens to a photo, in colour: green the best (kept by
+    /// default), teal kept too, red moving, grey moved already.
+    private func paint(_ state: State) -> (String) -> String {
+        let ui = self.ui
+        switch state {
+        case .best: return { ui.green($0) }
+        case .keep: return { ui.teal($0) }
+        case .move: return { ui.red($0) }
+        case .moved: return { ui.gray($0) }
         }
     }
 
@@ -1505,13 +1727,15 @@ final class ReviewSession {
         }
         switch state {
         case .best: return ui.wrap(note, width: width, lines: 2).map { self.ui.green($0) }
-        case .keep: return ui.wrap("Keep · " + (pick.decidedBy == "you" ? "you chose" : note), width: width, lines: 2)
+        case .keep:
+            let lines = ui.wrap("Keep · " + (pick.decidedBy == "you" ? "you chose" : note), width: width, lines: 2)
+            return lines.enumerated().map { $0.offset == 0 && $0.element.hasPrefix("Keep") ? ui.teal("Keep") + String($0.element.dropFirst(4)) : $0.element }
         case .moved: return [ui.dim(ui.fit("Moved", width))]
         case .move:
             if let reason = pick.reasons[id] ?? pick.suggestions[id] {
-                return [ui.blue("Move · ") + ui.amber(ui.fit(reason, width - 7))]
+                return [ui.red("Move · ") + ui.amber(ui.fit(reason, width - 7))]
             }
-            return ui.wrap("Move · " + note, width: width, lines: 2).map { self.ui.blue($0) }
+            return ui.wrap("Move · " + note, width: width, lines: 2).map { self.ui.red($0) }
         }
     }
 
@@ -1523,6 +1747,7 @@ final class ReviewSession {
     private func groupHeader() -> String {
         var header = crumbs() + ui.bold("Group \(groupIndex + 1) of \(groups.count)") + ui.dim(" · ")
             + Format.day.string(from: group.photos[0].date) + ui.dim(" · ") + ui.blue(group.kind.title) + ui.dim(" · \(order.count) photos")
+        if tilesPerRow != nil { header += ui.dim(" · \(gridLayout.perRow) a row · 0 fits them") }
         if pick.decidedBy == "apple-model" { header += ui.dim("  ✦ close call, picked by Apple Intelligence") }
         return ui.at(1, 1) + "\u{1B}[2K " + ui.clip(header, ui.cols - 2)
     }
@@ -1554,7 +1779,33 @@ final class ReviewSession {
     /// i: tiles show scene tags, time and scores under each photo, or just
     /// what happens to it, which leaves the photos more room.
     private var details = true
-    private var gridLayout: GroupLayout { GroupLayout(count: order.count, cols: ui.cols, rows: ui.rows, extra: details ? 7 : 5) }
+    private var gridLayout: GroupLayout {
+        GroupLayout(count: order.count, cols: ui.cols, rows: ui.rows, extra: details ? 7 : 5, perRow: tilesPerRow)
+    }
+
+    /// + and −: how many cards (on the groups) or photos (in a group) a row,
+    /// bigger or smaller than the automatic fit; nil is automatic. Kept as
+    /// you go from group to group, and for next time.
+    private var cardsPerRow: Int?
+    private var tilesPerRow: Int?
+    /// The most cards a row holds and stays readable (26 columns each).
+    private var mostCards: Int { max(1, (ui.cols + 1) / 29) }
+
+    private func resizeCards(_ change: Int) {
+        guard overview == .mosaic else {
+            toast = ui.dim("Sizes are for the mosaics · v switches to them")
+            return
+        }
+        let now = mosaicLayout().perRow, next = min(max(1, now + change), mostCards)
+        guard next != now else { return toast = ui.dim(change < 0 ? "As big as they go" : "As small as they go") }
+        cardsPerRow = next
+    }
+
+    private func resizeTiles(_ change: Int) {
+        let now = gridLayout.perRow, next = min(max(1, now + change), GroupLayout.most(cols: ui.cols))
+        guard next != now else { return toast = ui.dim(change < 0 ? "As big as they go" : "As small as they go") }
+        tilesPerRow = next
+    }
 
     /// Scrolls the group's grid so the highlighted photo is on screen.
     private func keepGridVisible() {
@@ -1570,10 +1821,10 @@ final class ReviewSession {
         let member = order[index]
         let s = state(member.id)
         let (r, c) = tileOrigin(index, layout)
+        // The frame says what happens to the photo; the highlighted one's is thick.
         let ui = self.ui, focused = index == cursor || allSelected
-        let paint: (String) -> String = { focused ? ui.blue($0) : s == .best ? ui.green($0) : ui.gray($0) }
         var out = ui.box(row: r, col: c, width: layout.tileWidth, height: layout.imageRows + 2,
-                         label: label(s, number: index + 1), paint: paint, heavy: focused)
+                         label: label(s, number: index + 1), paint: paint(s), heavy: focused)
         guard content else { return out }
         if let url = thumb(member) {
             out += ui.image(url, row: r + 1, col: c + 1, cols: layout.tileWidth - 2, rows: layout.imageRows,
@@ -1597,19 +1848,16 @@ final class ReviewSession {
         let status: String
         switch s {
         case .best: status = ui.green("★ Best")
-        case .keep: status = "Keep"
+        case .keep: status = ui.teal("Keep")
         case .moved: status = ui.dim("Moved")
-        case .move: status = ui.blue("→ Move") + ((pick.reasons[member.id] ?? pick.suggestions[member.id]).map { ui.dim(" · ") + ui.amber($0) } ?? "")
+        case .move: status = ui.red("→ Move") + ((pick.reasons[member.id] ?? pick.suggestions[member.id]).map { ui.dim(" · ") + ui.amber($0) } ?? "")
         }
-        let crop = faceCrop(member, cols: cols - 2, rows: max(4, rows - 7))
-        let zoom = !zoomed ? "" : crop == nil ? ui.dim("  · no faces in this one") : ui.dim("  · faces · z whole photo")
+        let zoomNote = zoom > 1 ? ui.dim("  · ") + ui.blue(Zoom.label(zoom))
+            + (previewOnly.contains(member.id) ? ui.amber(" · preview only") : "") + ui.dim(" · 0 whole photo") : ""
         let header = crumbs(group: true) + ui.bold("Photo \(cursor + 1) of \(order.count)") + ui.dim(" · ")
-            + Format.day.string(from: member.date) + "  " + status + zoom
+            + Format.day.string(from: member.date) + "  " + status + zoomNote
         var out = ui.at(1, 2) + ui.clip(header, cols - 2)
-        if let files = images[member.id] {
-            out += ui.image(folder.appendingPathComponent(files.full), row: 3, col: 2, cols: cols - 2,
-                            rows: max(4, rows - 7), dim: false, large: true, crop: crop)
-        }
+        out += drawPhoto(member, row: 3, col: 2, photoBox)
         let about = tab == .documents
             ? [member.document, member.excerpt.map { "“" + $0 + "”" }].compactMap { $0 }.joined(separator: "  ")
             : self.about(member)
@@ -1617,9 +1865,13 @@ final class ReviewSession {
         let note = ui.fit(pick.notes[member.id] ?? "", cols - 2)
         out += ui.at(rows - 2, 2) + ui.center(s == .best ? ui.green(note) : ui.dim(note), width: cols - 2)
         out += ui.at(rows - 1, 2) + ui.center(ui.dim(ui.fit(meta(member, short: false), cols - 2)), width: cols - 2)
+        if zoom > 1 {
+            return out + ui.actionBar(hints: "← → ↑ ↓ move around · n p photos · + − zoom · 0 whole photo · k keep · x move · esc back",
+                                      short: "←→↑↓ move · n p · + − · 0 all")
+        }
         return out + ui.actionBar(
-            hints: "← → photos · k keep · x move · b best · z faces · c compare · space back · ? keys",
-            short: "k keep · x move · z faces · space back")
+            hints: "← → photos · + zoom · z faces · k keep · x move · b best · c compare · space back · ? keys",
+            short: "k keep · x move · + zoom · space back")
     }
 
     /// Two photos side by side: the pinned one on the left (the best shot to
@@ -1631,7 +1883,7 @@ final class ReviewSession {
         let position = (candidates.firstIndex(of: cursor) ?? 0) + 1
         var out = ui.at(1, 2) + ui.clip(crumbs(group: true) + ui.bold("Compare")
             + ui.dim(" · candidate \(position) of \(candidates.count)")
-            + (zoomed ? ui.dim("  · faces · z whole photos") : ""), cols - 2)
+            + (zoom > 1 ? ui.dim("  · ") + ui.blue(Zoom.label(zoom)) + ui.dim(" · 0 whole photos") : ""), cols - 2)
 
         let paneWidth = (cols - 5) / 2
         let imageRows = max(4, rows - 9)
@@ -1643,10 +1895,7 @@ final class ReviewSession {
             let paint: (String) -> String = { [ui] in side == 1 ? ui.blue($0) : ui.gray($0) }
             out += ui.box(row: 3, col: c, width: paneWidth, height: imageRows + 2,
                           label: title + label(s, number: index + 1), paint: paint, heavy: side == 1)
-            if let files = images[member.id] {
-                out += ui.image(folder.appendingPathComponent(files.full), row: 4, col: c + 1, cols: paneWidth - 2, rows: imageRows,
-                                dim: false, large: true, crop: faceCrop(member, cols: paneWidth - 2, rows: imageRows))
-            }
+            out += drawPhoto(member, row: 4, col: c + 1, (paneWidth - 2, imageRows))
             let lines = caption(member.id, s, width: paneWidth)
             out += ui.at(imageRows + 6, c) + (lines.first ?? "")
             out += ui.at(imageRows + 7, c) + ui.dim(ui.fit(meta(member, short: false), paneWidth))
@@ -1657,8 +1906,9 @@ final class ReviewSession {
             out += ui.at(imageRows + 8, 2 + paneWidth + 3) + ui.clip(ui.dim("vs left: ") + notes, paneWidth)
         }
         return out + ui.actionBar(
-            hints: "← → next candidate · ↑ pin it · k keep · x move · b best · z faces · esc back · ? keys",
-            short: "← → · k keep · x move · z faces · esc")
+            hints: zoom > 1 ? "← → ↑ ↓ move around · n p candidates · + − zoom · 0 whole photos · k keep · x move · esc back"
+                : "← → next candidate · ↑ pin it · + zoom · z faces · k keep · x move · b best · esc back · ? keys",
+            short: zoom > 1 ? "←→↑↓ move · n p · + − · 0 all" : "← → · k keep · x move · + zoom · esc")
     }
 
     private func differences(_ a: Run.Member, comparedTo b: Run.Member) -> String {
@@ -1677,141 +1927,73 @@ final class ReviewSession {
         return parts.isEmpty ? ui.dim("about the same") : parts.joined(separator: ui.dim(" · "))
     }
 
-    private func helpSheet() -> String {
-        func row(_ key: String, _ text: String) -> String { ui.blue(key.padding(toLength: 12, withPad: " ", startingAt: 0)) + text }
-        let sections: [[String]] = [
-            [row("← → ↑ ↓", "move around · home and end: first and last"), row("space enter", "open · look closer · confirm"),
-             row("esc", "back · cancel (never changes anything)"), row("1–9  i", "go to that photo · show or hide details")],
-            [row("k", "keep this photo (or the whole group)"), row("x", "move this photo (group: all but the best)"),
-             row("b", "make it the best ★"), row("r", "say why it's moving"),
-             row("a", "groups: accept every clear group · in a group: select all"),
-             row("c", "compare two photos side by side"), row("z", "zoom in on the faces, when looking closer"),
-             row("o", "show the photo in Finder (Photos library: in Photos)"),
-             row("e", "edit in Photos (folders: Preview) · after a: all of them"),
-             row("d", "documents tab: file this copy in PGDocuments"), row("tab", "switch between Duplicates and Documents")],
-            [row("m", "move or delete the selection (asks first)"), row("u", "undo the last change or move"),
-             row("v", "mosaics or filmstrips"), row("n p  ] [", "next or previous group · one still to review"),
-             row("R", "groups: scan the same place again, from scratch"),
-             row("q", "quit · everything is saved as you go")],
-        ]
-        let close = ui.dim("any key to close")
-        let full = [ui.bold("Keys"), ""] + Array(sections.joined(separator: [""])) + ["", close]
-        // In a short window: no title or gaps, so every key still fits.
-        return ui.sheet(full.count <= ui.rows - 4 ? full : Array(sections.joined()) + [close], width: 78)
+    /// ?: every key, as a page of its own.
+    private func helpPage() -> String {
+        ui.keysPage("Keys", [
+            ("Moving around", [("← → ↑ ↓", "move · home, end: first, last"), ("space enter", "open · look closer"),
+                               ("esc", "back; never changes anything"), ("1–9", "that photo in a group"),
+                               ("n  p", "next or previous group"), ("]  [", "next group still to review")]),
+            ("Deciding", [("k", "keep it (groups: keep all)"), ("x", "move it (groups: all but best)"),
+                          ("b", "make it the best ★"), ("a", "accept clear groups · select all"),
+                          ("r", "say why it's moving"), ("d", "file a document in PGDocuments")]),
+            ("Looking", [("+  −", "bigger or smaller · zoom in or out"), ("0", "automatic size · whole photo"),
+                         ("← → ↑ ↓", "zoomed: move around · or drag"), ("n  p", "zoomed: next photo, same spot"),
+                         ("z", "zoom in on the faces"), ("c", "compare two side by side"), ("i", "details under the photos"),
+                         ("v", "mosaics or filmstrips"), ("o", "show in Finder or Photos"), ("e", "edit in Photos (folders: Preview)"),
+                         ("tab", "Duplicates or Documents")]),
+            ("Doing it", [("m", "move or delete; asks in the bar"), ("u", "undo the last change or move"),
+                          ("R", "groups: scan the same place again, from scratch"), ("q", "quit; reopens where you were")]),
+        ])
     }
 
-    private func reasonSheet() -> String {
-        let id = order[cursor].id
-        let suggestion = allSelected ? nil : pick.suggestions[id]
-        var lines = [ui.bold(allSelected ? "Why move all \(order.count) photos?" : "Why move photo \(cursor + 1)?")]
-        if let suggestion { lines.append(ui.dim("PixelGraph noticed: ") + ui.amber(suggestion)) }
-        lines.append("")
-        let options = Inspector.reasons.enumerated().map { ui.blue("\($0.offset + 1)") + " \($0.element)" }
-        if ui.cols >= 54 {
-            lines += [options.prefix(3).joined(separator: "   "), options.dropFirst(3).joined(separator: "   ")]
-        } else {
-            lines += options
+    /// r: why it's moving, asked in the bar; 1–9 answer, enter takes what
+    /// PixelGraph noticed.
+    private func reasonPrompt() -> String {
+        let suggestion = allSelected ? nil : pick.suggestions[order[cursor].id]
+        let options = Inspector.reasons.enumerated().map { "\($0.offset + 1) \($0.element)" }.joined(separator: " · ")
+        return ui.prompt(allSelected ? "Why move all \(order.count)?" : "Why move photo \(cursor + 1)?", note: ui.hints(options),
+                         buttons: ui.button("enter " + (suggestion ?? "other").capitalizedFirst))
+    }
+
+    /// m: asked in the bar. Enter moves the copies to PGDuplicates (junk to
+    /// PGJunk), the red d deletes them instead; documents go to PGDocuments.
+    private func confirmPrompt(file: [String], duplicates: [String], describe: [String]) -> String {
+        func count(_ n: Int) -> String { "\(n) photo\(n == 1 ? "" : "s")" }
+        let size = run.bytes(duplicates).map { " (\(Run.size($0)))" } ?? ""
+        let junkIDs = self.junkIDs
+        let junk = duplicates.filter { junkIDs.contains($0) }.count
+        let into = junk == 0 ? "PGDuplicates" : junk == duplicates.count ? "PGJunk" : "PGDuplicates, junk to PGJunk"
+        var notes: [String] = []
+        if !duplicates.isEmpty {
+            switch source {
+            case .album(let id, let name):
+                notes.append(Library.readOnlyReason(id).map { "Into the “\(into)” album; \(name) is \($0), so they stay in it too" }
+                             ?? "Into the “\(into)” album, out of \(name); still in your library")
+            case .dates, .months: notes.append("Into the “\(into)” album; still in your library")
+            case .folder(let path): notes.append("Into “\(into)” inside \((path as NSString).lastPathComponent), with RAW and sidecars")
+            }
+            notes.append(source.isPhotos ? "d deletes to Recently Deleted instead (30 days)" : "d sends them to the Trash instead; u puts them back")
         }
-        lines += ["", ui.dim(suggestion == nil ? "enter other · esc cancel" : "enter use suggestion · esc cancel")]
-        return ui.sheet(lines)
+        if !file.isEmpty, !source.isPhotos { notes.append("documents go into “\(Files.documentsFolder)”") }
+        if !describe.isEmpty { notes.append("the \(count(describe.count)) you keep get a caption") }
+        let question = duplicates.isEmpty ? "File \(count(file.count)) in PGDocuments?"
+            : file.isEmpty ? "Move \(count(duplicates.count))\(size)?" : "File \(file.count) and move \(count(duplicates.count))\(size)?"
+        // Deleting is a red button of its own, never what enter does.
+        let buttons = duplicates.isEmpty ? ui.button("enter File \(file.count)")
+            : ui.dangerButton("d Delete") + "  " + ui.button("enter Move \(duplicates.count + file.count)")
+        return ui.prompt(question, note: ui.dim(notes.joined(separator: " · ")), buttons: buttons)
     }
 
-    /// The moment the last group gets its ✓: offers to carry out what's
-    /// selected, once a session.
+    /// The moment the last group gets its ✓: says so, with what's waiting,
+    /// once a session. A message, not a question: m is right there.
     private func announceIfDone() {
         guard !announcedDone, sheet == nil, run.reviewedGroups == run.allGroups.count else { return }
         announcedDone = true
-        if run.waiting > 0 { sheet = .done }
-    }
-
-    private func doneSheet() -> String {
-        let width = min(ui.cols - 2, 64) - 4
         let waiting = groups.flatMap { g in g.photos.map(\.id).filter { g.pick.willMove($0) } }
+        guard !waiting.isEmpty else { return }
         let size = run.bytes(waiting).map { " (\(Run.size($0)))" } ?? ""
-        var lines = [ui.green("✓ ") + ui.bold("Every group has been reviewed"), ""]
-        lines += ui.wrap("\(waiting.count) photo\(waiting.count == 1 ? " is" : "s are")\(size) selected to "
-                         + (tab == .documents ? "file or move" : "move") + ". Do it now, or look again first: nothing happens until you confirm.",
-                         width: width, lines: 3).map { ui.dim($0) }
-        lines += ["", ui.spread("", ui.dim("esc Not yet   ") + ui.button("enter Move now…"), width: width)]
-        return ui.sheet(lines, width: 68)
-    }
-
-    /// Asks before leaving the review. Nothing is lost either way (choices
-    /// are saved as you go), but a stray key shouldn't end a long session.
-    private func leaveSheet(_ outcome: Outcome) -> String {
-        let waiting = run.waiting
-        let note = waiting > 0
-            ? "\(waiting) photo\(waiting == 1 ? " is" : "s are") still selected to move or file; that waits for you."
-            : "Everything you chose has been carried out."
-        let width = min(ui.cols - 2, 64) - 4
-        if outcome == .rescan {
-            var lines = [ui.bold("Scan \(ui.fit(run.scope, 36)) again?"), ""]
-            lines += ui.wrap("It's grouped afresh with your current settings, and every group starts again from PixelGraph's own picks: "
-                             + "your choices in this review are dropped. Photos already moved stay moved.", width: width, lines: 4).map { ui.dim($0) }
-            lines += ["", ui.spread("", ui.hints("esc Stay   ") + ui.button("enter Scan again"), width: width)]
-            return ui.sheet(lines, width: 68)
-        }
-        let (title, after, button) = outcome == .home
-            ? ("Back to the start screen?", "“Continue reviewing” on the start screen brings you back here.", "enter Leave")
-            : ("Quit PixelGraph?", "Run pixelgraph again to continue where you left off.", "enter Quit")
-        var lines = [ui.bold(title), ""]
-        lines += ui.wrap("Your choices are saved. \(note)", width: width, lines: 3).map { ui.dim($0) }
-        lines += ui.wrap(after, width: width, lines: 2).map { ui.dim($0) }
-        lines += ["", ui.spread("", ui.dim("esc Stay   ") + ui.button(button), width: width)]
-        return ui.sheet(lines, width: 68)
-    }
-
-    /// The move sheet: enter (or p) moves the copies to PGDuplicates, d
-    /// deletes them instead. Documents are always filed in PGDocuments.
-    private func confirmSheet(file: [String], duplicates: [String], describe: [String]) -> String {
-        func count(_ n: Int) -> String { "\(n) photo\(n == 1 ? "" : "s")" }
-        let width = min(ui.cols - 2, 64) - 4
-        var lines: [String]
-        if duplicates.isEmpty {
-            lines = [ui.bold("File \(count(file.count)) in PGDocuments?"), ""]
-        } else {
-            let size = run.bytes(duplicates).map { " (\(Run.size($0)))" } ?? ""
-            lines = [ui.bold(file.isEmpty ? "What should happen to \(count(duplicates.count))\(size)?"
-                             : "File \(file.count) in PGDocuments. What about \(count(duplicates.count))\(size)?"), ""]
-        }
-        let keep: String
-        switch source {
-        case .album(let id, let name):
-            if let reason = Library.readOnlyReason(id) {
-                keep = "added to the “\(Library.duplicatesAlbum)” album; \(name) is \(reason), so they stay in it too"
-            } else {
-                keep = "out of \(name), into the “\(Library.duplicatesAlbum)” album; still in your library"
-            }
-        case .dates, .months:
-            keep = "into the “\(Library.duplicatesAlbum)” album; still in your library"
-        case .folder(let path):
-            keep = "into “\(Files.duplicatesFolder)” inside \((path as NSString).lastPathComponent), with RAW and sidecars"
-        }
-        if !duplicates.isEmpty {
-            let gone = source.isPhotos
-                ? "to Recently Deleted in Photos (30 days); macOS asks first; PixelGraph can’t undo it"
-                : "to the Trash, with RAW and sidecars; u puts them back"
-            let junkIDs = self.junkIDs
-            let junk = duplicates.filter { junkIDs.contains($0) }.count
-            let into = junk == 0 ? "PGDuplicates" : junk == duplicates.count ? "PGJunk" : "PGDuplicates, junk to PGJunk"
-            let moveLines = [ui.blue("enter") + "  Move to \(into)"]
-                + ui.wrap(keep, width: width - 7, lines: 2).map { "       " + ui.dim($0) }
-            let deleteLines = [ui.red("d    ") + "  Delete"]
-                + ui.wrap(gone, width: width - 7, lines: 2).map { "       " + ui.dim($0) }
-            lines += moveLines + [""] + deleteLines
-        }
-        if !file.isEmpty, !source.isPhotos {
-            lines += ["", ui.dim("Documents go into “\(Files.documentsFolder)” inside the folder.")]
-        }
-        if !describe.isEmpty {
-            lines += ["", ui.dim("The \(count(describe.count)) you keep get a caption, title and"),
-                      ui.dim(source.isPhotos ? "keywords in Photos, after what’s already there." : "keywords in their files, after what’s already there.")]
-        }
-        // Deleting is a red button of its own, never what enter does.
-        let buttons = duplicates.isEmpty ? ui.button("enter File \(file.count)")
-            : ui.dangerButton("d Delete \(duplicates.count)") + "  " + ui.button("enter Move \(duplicates.count + file.count)")
-        lines += ["", ui.spread("", ui.dim("esc Cancel   ") + buttons, width: width)]
-        return ui.sheet(lines, width: 68)
+        toast = ui.green("✓") + " Every group reviewed" + ui.dim(" · \(waiting.count) photo\(waiting.count == 1 ? "" : "s")\(size) selected · ")
+            + ui.blue("m") + ui.dim(" moves them")
     }
 
     /// The photo's description and scene tags, or for documents their tags line.

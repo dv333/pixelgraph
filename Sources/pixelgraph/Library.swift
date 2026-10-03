@@ -227,6 +227,13 @@ enum Library {
         }
     }
 
+    /// The photo as big as it comes (up to `maxSide`), for zooming in: the
+    /// original if it's on this Mac, or with `download` fetched from iCloud.
+    /// Never the small stand-in Photos keeps for quick display; nil instead.
+    static func fullSize(_ asset: PHAsset, maxSide: CGFloat, download: Bool, timeout: TimeInterval = 30) async -> CGImage? {
+        await request(asset, maxSide, .highQualityFormat, network: download, timeout: download ? timeout : nil)
+    }
+
     private static func request(
         _ asset: PHAsset, _ maxSide: CGFloat, _ mode: PHImageRequestOptionsDeliveryMode,
         network: Bool, timeout: TimeInterval?

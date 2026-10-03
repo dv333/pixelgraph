@@ -52,6 +52,9 @@ enum Theme {
     static var green: RGB { light ? (26, 127, 55) : (48, 209, 88) }
     static var red: RGB { light ? (200, 30, 30) : (255, 105, 97) }
     static var amber: RGB { light ? (168, 82, 0) : (255, 179, 64) }
+    /// Photos you keep besides the best: apart from green (the best), red
+    /// (moving) and the accent (the highlight). Darker on light, for contrast.
+    static var teal: RGB { light ? (0, 128, 145) : (64, 200, 224) }
     /// The accent: keys, the cursor, bars and buttons.
     static var accent: RGB { light ? (124, 88, 200) : (92, 156, 245) }
     static var blue: RGB { accent }
