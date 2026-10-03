@@ -12,7 +12,12 @@ struct Photo: Sendable {
     var quality: Quality? = nil
     /// Where it was taken, when known.
     var location: Location? = nil
+    /// The date is when it was taken (a camera's own date, or Photos'), not
+    /// just when the file was saved: WhatsApp and downloads lose the real one.
+    var timed = true
     var pixels: Int { width * height }
+    /// Landscape, portrait, or nil when square or the size isn't known.
+    var landscape: Bool? { width == height || width == 0 || height == 0 ? nil : width > height }
     var aspect: Double { height > 0 ? Double(width) / Double(height) : 1 }
 }
 
@@ -61,8 +66,13 @@ struct GroupingRules: Sendable, Codable {
     func threshold(_ a: Photo, _ b: Photo) -> Float {
         if a.isScreenshot != b.isScreenshot { return -1 }
         let seconds = abs(a.date.timeIntervalSince(b.date))
-        let closeness = Float(exp(-seconds / max(1, momentWindow / 3)))
+        // Without a real capture time, a shared date (files saved together)
+        // says nothing about being the same moment: use the stricter limit.
+        let closeness = a.timed && b.timed ? Float(exp(-seconds / max(1, momentWindow / 3))) : 0
         var threshold = sceneThreshold + (momentThreshold - sceneThreshold) * closeness
+        // One landscape and one portrait is usually a different shot: only a
+        // close match counts (an exact rotated copy is caught as a copy before this).
+        if let la = a.landscape, let lb = b.landscape, la != lb { threshold = min(threshold, sceneThreshold - 0.05) }
         // A different number of people is usually a different shot.
         let faces = abs(a.analysis.faceCount - b.analysis.faceCount)
         if faces >= 2, a.analysis.faceCount > 0, b.analysis.faceCount > 0 { threshold -= 0.1 }
@@ -89,8 +99,9 @@ enum Grouper {
         let i: Int
         let j: Int
         let distance: Float
-        /// A close call between photos taken apart in time: worth checking
-        /// that the pictures really line up before grouping them.
+        /// A close call (apart in time, or let through only by the looser
+        /// same-moment limit): worth checking that the pictures really line
+        /// up before grouping them.
         let needsCheck: Bool
     }
 
@@ -132,8 +143,10 @@ enum Grouper {
                         continue
                     }
                     guard dist <= rules.threshold(a, b), !rules.farApart(a, b) else { continue }
+                    // Line the pictures up when they're apart in time, or when only the
+                    // looser same-moment limit let them through.
                     let apart = abs(a.date.timeIntervalSince(b.date)) > rules.momentWindow
-                    edges.append(Edge(i: i, j: j, distance: dist, needsCheck: apart))
+                    edges.append(Edge(i: i, j: j, distance: dist, needsCheck: apart || dist > rules.sceneThreshold))
                 }
             }
         }

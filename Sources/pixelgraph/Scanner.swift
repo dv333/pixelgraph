@@ -417,7 +417,7 @@ struct Scanner {
                 // iCloud Drive files have no size until downloaded; use the thumbnail's shape.
                 let (w, h) = item.width > 0 ? (item.width, item.height) : ($0.previewSide, $0.previewSide)
                 return Photo(id: item.id, date: item.date, isScreenshot: item.isScreenshot, width: w, height: h, analysis: $0,
-                             quality: qualities[item.id], location: item.location)
+                             quality: qualities[item.id], location: item.location, timed: item.timed)
             }
         }
     }

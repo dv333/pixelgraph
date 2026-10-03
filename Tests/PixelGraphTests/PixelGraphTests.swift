@@ -30,6 +30,31 @@ private func ids(_ groups: [[Int]], _ photos: [Photo]) -> Set<Set<String>> {
     #expect(Grouper.groups(apart, rules: rules).isEmpty)
 }
 
+@Test func noCaptureTimeIsNotTheSameMoment() {
+    // Saved in the same second (WhatsApp), but with no camera date: the strict limit.
+    var a = photo("A", 0), b = photo("B", 0.4)
+    a.timed = false
+    b.timed = false
+    #expect(Grouper.groups([a, b], rules: rules).isEmpty)
+    // Real copies still match.
+    var c = photo("C", 0.03)
+    c.timed = false
+    #expect(Grouper.groups([a, c], rules: rules).count == 1)
+}
+
+@Test func landscapeAndPortraitNeedACloseMatch() {
+    let landscape = photo("A", 0)
+    let portrait = Photo(id: "B", date: t0, isScreenshot: false, width: 3000, height: 4000, analysis: photo("B", 0.4).analysis)
+    #expect(Grouper.groups([landscape, portrait], rules: rules).isEmpty)
+    #expect(Grouper.groups([landscape, photo("C", 0.4)], rules: rules).count == 1)
+}
+
+@Test func looseSameMomentMatchesGetThePixelCheck() {
+    let edges = Grouper.edges([photo("A", 0), photo("B", 0.4), photo("C", 0.2)], rules: rules)
+    #expect(edges.first { $0.i == 0 && $0.j == 1 }?.needsCheck == true)
+    #expect(edges.first { $0.i == 0 && $0.j == 2 }?.needsCheck == false)
+}
+
 @Test func copiesMatchAcrossTime() {
     let photos = [photo("A", 0), photo("B", 0.03, at: 86_400 * 365)]
     #expect(Grouper.groups(photos, rules: rules).count == 1)

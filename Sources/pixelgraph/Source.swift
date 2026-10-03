@@ -121,8 +121,11 @@ struct Item: @unchecked Sendable {
     let isScreenshot: Bool
     /// Where it was taken, when known.
     let location: Location?
+    /// `date` is when it was taken, not just when the file was saved.
+    let timed: Bool
 
     init(_ asset: PHAsset) {
+        timed = true
         backing = .photo(asset)
         id = asset.localIdentifier
         date = asset.creationDate ?? .distantPast
@@ -161,6 +164,7 @@ struct Item: @unchecked Sendable {
         // Files only in iCloud Drive: reading them would download them, so use
         // what the file system knows and let the thumbnail fill in later.
         if Files.isCloudOnly(url) {
+            timed = false
             location = nil
             date = values?.creationDate ?? modified
             width = 0
@@ -174,7 +178,9 @@ struct Item: @unchecked Sendable {
         if let orientation = props[kCGImagePropertyOrientation] as? Int, orientation >= 5 { swap(&w, &h) }
         width = w
         height = h
-        date = Files.captureDate(props) ?? values?.creationDate ?? modified
+        let taken = Files.captureDate(props)
+        timed = taken != nil
+        date = taken ?? values?.creationDate ?? modified
         location = Files.location(props)
     }
 

@@ -298,7 +298,7 @@ extension Photo {
         var analysis = scores
         analysis.vector = self.analysis.vector
         return Photo(id: id, date: date, isScreenshot: isScreenshot, width: width, height: height, analysis: analysis,
-                     quality: quality, location: location)
+                     quality: quality, location: location, timed: timed)
     }
 }
 

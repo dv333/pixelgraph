@@ -157,10 +157,10 @@ extension Run.Group.Kind {
         // Calibrated on test images: resized copies ~0.03, crops and colour
         // edits 0.08–0.21. Re-imported copies keep the original capture time.
         if photos.allSatisfy(\.isScreenshot) { self = .screenshots }
-        else if farthest < 0.06 || (farthest < 0.25 && span < 2) { self = .copies }
+        else if farthest < 0.06 || (farthest < 0.25 && span < 2 && photos.allSatisfy(\.timed)) { self = .copies }
         else if photos.indices.allSatisfy({ i in photos.indices.allSatisfy { j in
             i == j || GroupingRules.isCopy(photos[i], photos[j], distance: Grouper.distance(photos[i], photos[j])) } }) { self = .copies }
-        else if span <= rules.momentWindow { self = .moment }
+        else if span <= rules.momentWindow, photos.allSatisfy(\.timed) { self = .moment }
         else { self = .scene }
     }
 }
