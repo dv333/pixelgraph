@@ -4,7 +4,8 @@ import Foundation
 /// enlarged. Every photo is Keep or Move; everything but the best starts
 /// selected to move, so most of the time you only confirm.
 final class ReviewSession {
-    enum Outcome { case quit, home }
+    /// rescan: scan the same place again, from scratch, and review that.
+    enum Outcome { case quit, home, rescan }
 
     private(set) var run: Run
     private let runFile: URL
@@ -225,6 +226,12 @@ final class ReviewSession {
             case .char("v"): overview = overview == .mosaic ? .filmstrip : .mosaic; scroll = 0
             case .char("a"): acceptClear()
             case .char("m"): askToMove(everything: true)
+            case .char("R"):
+                guard run.source != nil else {
+                    toast = ui.dim("This scan is too old to scan again from here; start it from the start screen.")
+                    break
+                }
+                sheet = .leave(.rescan)
             case .tab:
                 guard tabs.count > 1 else {
                     toast = ui.dim(tab == .documents ? "No lookalikes or junk in this scan." : "No documents in this scan.")
@@ -1684,6 +1691,7 @@ final class ReviewSession {
              row("d", "documents tab: file this copy in PGDocuments"), row("tab", "switch between Duplicates and Documents")],
             [row("m", "move or delete the selection (asks first)"), row("u", "undo the last change or move"),
              row("v", "mosaics or filmstrips"), row("n p  ] [", "next or previous group · one still to review"),
+             row("R", "groups: scan the same place again, from scratch"),
              row("q", "quit · everything is saved as you go")],
         ]
         let close = ui.dim("any key to close")
@@ -1736,6 +1744,13 @@ final class ReviewSession {
             ? "\(waiting) photo\(waiting == 1 ? " is" : "s are") still selected to move or file; that waits for you."
             : "Everything you chose has been carried out."
         let width = min(ui.cols - 2, 64) - 4
+        if outcome == .rescan {
+            var lines = [ui.bold("Scan \(ui.fit(run.scope, 36)) again?"), ""]
+            lines += ui.wrap("It's grouped afresh with your current settings, and every group starts again from PixelGraph's own picks: "
+                             + "your choices in this review are dropped. Photos already moved stay moved.", width: width, lines: 4).map { ui.dim($0) }
+            lines += ["", ui.spread("", ui.hints("esc Stay   ") + ui.button("enter Scan again"), width: width)]
+            return ui.sheet(lines, width: 68)
+        }
         let (title, after, button) = outcome == .home
             ? ("Back to the start screen?", "“Continue reviewing” on the start screen brings you back here.", "enter Leave")
             : ("Quit PixelGraph?", "Run pixelgraph again to continue where you left off.", "enter Quit")

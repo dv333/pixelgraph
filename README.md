@@ -38,6 +38,7 @@ pixelgraph scan --album "Japan 2025"         # an Apple Photos album
 pixelgraph scan --from 2024-06 --to 2024-08  # part of your library
 pixelgraph scan --folder /Volumes/T7/DCIM    # a folder, drive or iCloud Drive folder
 pixelgraph review                            # pick up where you left off
+pixelgraph scan --again                      # scan the last place again, from scratch
 pixelgraph report                            # the last scan as a web page
 pixelgraph undo                              # put back the last move
 pixelgraph eval                              # how PixelGraph did against your reviews
@@ -75,6 +76,8 @@ One key means one thing on every screen, and keys set a state rather than toggli
 
 In iTerm2, WezTerm, kitty and Ghostty photos are shown as real images; other true-colour terminals get colour-block previews. Photos selected to move are shown muted, not darkened, so they're still easy to judge. Clicking a sheet's button does what it says; clicking outside a sheet closes it.
 
+
+**Scanning again.** `R` on the groups screen (or "Scan it again" under "Continue reviewing" on the start screen, or `pixelgraph scan --again`) scans the same folder, album or months again from scratch, with your current settings, and opens the new review. Your choices in the old review are dropped; photos already moved stay moved. Measurements are cached, so it takes seconds.
 
 **Editing.** `e` opens the highlighted photo in Photos' editor (after `a`, every photo in the group goes into a "PG Edit" album in Photos: Return edits, → goes to the next). Photos from folders and drives open in Preview. When you come back, the previews show your edit. Opening straight into Edit presses Return in Photos for you, which needs your terminal allowed in System Settings → Privacy & Security → Accessibility; without it the photo is just shown and you press Return. Edits in Photos can always be undone with Image → Revert to Original.
 ### Documents

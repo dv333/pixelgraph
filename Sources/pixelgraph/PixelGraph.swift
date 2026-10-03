@@ -101,6 +101,9 @@ struct Scan: AsyncParsableCommand {
     @Option(help: "Photos library up to this date, inclusive.")
     var to: String?
 
+    @Flag(help: "Scan the place you scanned last again, from scratch (your choices in its review are dropped).")
+    var again = false
+
     @Flag(help: "Just scan; don't open the review afterwards.")
     var noReview = false
 
@@ -108,7 +111,11 @@ struct Scan: AsyncParsableCommand {
 
     func validate() throws {
         let chosen = [album != nil, folder != nil, from != nil || to != nil].filter { $0 }.count
-        if chosen == 0 { throw ValidationError("Choose --album, --folder or --from/--to. Or run `pixelgraph` to pick.") }
+        if again {
+            if chosen > 0 { throw ValidationError("--again scans the last place again; leave out --album, --folder and --from/--to.") }
+            return
+        }
+        if chosen == 0 { throw ValidationError("Choose --album, --folder or --from/--to, or --again. Or run `pixelgraph` to pick.") }
         if chosen > 1 { throw ValidationError("Choose one of --album, --folder or --from/--to.") }
         _ = try DateArgument.parse(from, end: false)
         _ = try DateArgument.parse(to, end: true)
@@ -116,7 +123,13 @@ struct Scan: AsyncParsableCommand {
 
     func run() async throws {
         let source: Source
-        if let folder {
+        if again {
+            guard let last = (try? Run.load())?.source else {
+                throw ValidationError("There's no earlier scan to do again. Choose --album, --folder or --from/--to.")
+            }
+            if last.isPhotos { try await Library.requestAccess() }
+            source = last
+        } else if let folder {
             let path = (folder as NSString).expandingTildeInPath
             source = .folder(URL(fileURLWithPath: path))
         } else {
@@ -135,7 +148,8 @@ struct Scan: AsyncParsableCommand {
         stop.cancel()
 
         if !noReview, isatty(STDIN_FILENO) != 0, !run.allGroups.isEmpty {
-            try await ReviewSession(run: run).show()
+            let outcome = try await ReviewSession(run: run, graphics: Settings.load().graphics).show()
+            try await Again.follow(outcome, flags: options)
         } else {
             print("\nReview with `pixelgraph review`, or open the report with `pixelgraph report`.")
         }
@@ -175,7 +189,36 @@ struct Review: AsyncParsableCommand {
             return
         }
         if run.source?.isPhotos ?? true, folder == nil { try await Library.requestAccess() }
-        try await ReviewSession(run: run, runFile: runFile, folder: reportFolder, graphics: graphics ?? Settings.load().graphics, start: group).show()
+        let mode = graphics ?? Settings.load().graphics
+        let outcome = try await ReviewSession(run: run, runFile: runFile, folder: reportFolder, graphics: mode, start: group).show()
+        try await Again.follow(outcome, runFile: runFile, reportFolder: reportFolder, graphics: mode)
+    }
+}
+
+/// R in a review started from the command line: scan the same place again,
+/// from scratch, and open the new review, for as long as it's asked for.
+enum Again {
+    static func follow(_ outcome: ReviewSession.Outcome, flags: ScanOptions? = nil, runFile: URL = Paths.lastRun,
+                       reportFolder: URL = Paths.report, graphics: TerminalImage.Mode? = nil) async throws {
+        var outcome = outcome
+        while outcome == .rescan {
+            guard let source = (try? Run.load(from: runFile))?.source else { return }
+            let settings = Settings.load()
+            var options = flags?.scanner(settings) ?? settings.scanner
+            options.runFile = runFile
+            options.reportFolder = reportFolder
+            if source.isPhotos { try await Library.requestAccess() }
+            let scanner = Scanner(source: source, options: options)
+            let stop = StopHandler { scanner.board.abandon() }
+            let run = try await scanner.run()
+            stop.cancel()
+            guard !run.allGroups.isEmpty else {
+                print("\nNothing to tidy in \(source) this time: no lookalikes, junk or documents.")
+                return
+            }
+            outcome = try await ReviewSession(run: run, runFile: runFile, folder: reportFolder,
+                                              graphics: graphics ?? settings.graphics).show()
+        }
     }
 }
 

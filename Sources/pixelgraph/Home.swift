@@ -19,6 +19,8 @@ final class App {
         case heading(String)
         /// The last scan, still being reviewed.
         case resume(scope: String, waiting: Int, reviewed: Int, groups: Int)
+        /// Scan the place being reviewed again, from scratch.
+        case again(Source)
         case source(Source, detail: String)
         case months(total: Int)
         /// A year on the months screen; ticking it ticks all its months.
@@ -135,7 +137,7 @@ final class App {
                 case .enter:
                     choosing = nil
                     replacing = nil
-                    if try await scan(source) == .quit { return }
+                    if try await follow(scan(source)) == .quit { return }
                 case .escape, .backspace:
                     choosing = nil
                     replacing = nil
@@ -153,7 +155,7 @@ final class App {
                 case .scan(let source):
                     choose(source)
                 case .resume:
-                    if try await resume() == .quit { return }
+                    if try await follow(resume()) == .quit { return }
                 case .settings:
                     openSettings()
                 case .empty:
@@ -230,6 +232,7 @@ final class App {
         let last = (try? Run.load()).flatMap { $0.source != nil && $0.waiting > 0 ? $0 : nil }
         if let last {
             rows.append(.resume(scope: last.scope, waiting: last.waiting, reviewed: last.reviewedGroups, groups: last.allGroups.count))
+            if let source = last.source { rows.append(.again(source)) }
             rows.append(.heading(""))
         }
         let recents = Recents.all()
@@ -504,6 +507,7 @@ final class App {
         case .source(let source, _): return opening ? nil : .scan(source)
         case .month(let source, _): return .scan(source)
         case .resume: return .resume
+        case .again(let source): return .scan(source)
         case .year: return nil
         case .months:
             screen = .months
@@ -609,7 +613,20 @@ final class App {
         return outcome
     }
 
-    private func scan(_ source: Source) async throws -> ReviewSession.Outcome {
+    /// After a review: when it asked to scan the same place again, do that
+    /// (straight into the new review), as often as it asks.
+    private func follow(_ outcome: ReviewSession.Outcome) async throws -> ReviewSession.Outcome {
+        var outcome = outcome
+        while outcome == .rescan {
+            guard let source = (try? Run.load())?.source else { return .home }
+            settings = Settings.load()
+            options = flags.scanner(settings)
+            outcome = try await scan(source, again: true)
+        }
+        return outcome
+    }
+
+    private func scan(_ source: Source, again: Bool = false) async throws -> ReviewSession.Outcome {
         // The scan and the review take over the screen, so the home screen
         // must repaint fully when it comes back.
         defer { drawnFrame = nil }
@@ -654,7 +671,7 @@ final class App {
         ui.term.drainInput()
         ui.term.write(ui.barLine(ui.rows, ui.spread(ui.hints("enter review it · esc back to the start screen"), ui.button("enter Review"),
                                                     width: ui.cols - 4)))
-        guard waitToReview() else {
+        guard again || waitToReview() else {
             message = ui.green("✓") + " Scanned \(source) · “Continue reviewing” picks it up when you're ready"
             screen = .home
             load()
@@ -847,6 +864,7 @@ final class App {
         case .scanHere(let url, _): action = ui.button("Scan \(ui.fit(url.lastPathComponent, 28))")
         case .browse, .folder, .months, .albums, .folders: action = ui.button("Open")
         case .resume: action = ui.button("Continue")
+        case .again: action = ui.button("Scan again")
         case .settings: action = ui.button("Open settings")
         case .range(_, let title, _): action = ui.button("Scan \(title.lowercased())")
         case .empty: action = ui.button("Empty…")
@@ -857,6 +875,7 @@ final class App {
         switch rows.indices.contains(selected) ? rows[selected] : .choose {
         case .resume: verb = "continue"
         case .source, .month, .range, .scanHere, .year: verb = "scan"
+        case .again: verb = "scan again"
         case .empty: verb = "empty"
         case .choose: verb = "choose"
         default: verb = "open"
@@ -920,6 +939,8 @@ final class App {
             let bar = ProgressBoard.bar(Double(reviewed) / Double(max(1, groups)), width: 8)
             return columns(ui.bold("Continue reviewing") + " " + scope, ui.dim("\(waiting.formatted()) waiting"),
                            bar + ui.dim(" \(reviewed) of \(groups)"), width: width)
+        case .again:
+            return columns("Scan it again", ui.dim("from scratch"), ui.dim("drops this review"), width: width)
         case .source(let source, let text):
             return columns(source.description, ui.dim(text), status(source.places), width: width)
         case .range(_, let title, let text):
