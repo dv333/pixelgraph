@@ -2,6 +2,8 @@
 
 Find near-identical photos, keep the best, and move the rest to PGDuplicates or delete them — on your Mac, with nothing uploaded.
 
+![PixelGraph scanning a folder of mountain and lake photos, then reviewing, moving and undoing](docs/pixelgraph-demo.gif)
+
 PixelGraph groups retakes, bursts, portraits where only the expression changes, copies and edits, the same scene revisited, and repeated screenshots. It picks the best shot in each group, flags photos with closed eyes or blocked faces, and pre-selects everything else to move. You confirm, it moves, and you can undo.
 
 Works with **Apple Photos and iCloud Photos**, **folders**, **external drives** and **iCloud Drive**.
