@@ -20,6 +20,7 @@ final class UI: @unchecked Sendable {
         blocks = [:]
         encoded = [:]
         sizes = [:]
+        placed = [:]
     }
     private var blocks: [String: [String]] = [:]
     /// Pictures ready to send: JPEG for iTerm2's protocol, PNG for kitty's.
@@ -31,7 +32,7 @@ final class UI: @unchecked Sendable {
 
     func enter() {
         guard !active else { return }
-        Theme.detect()
+        Theme.detect(background: sharp)
         term.enter()
         // Keep the window's own title to put back, and name it PixelGraph meanwhile.
         term.write("\u{1B}[22;0t" + title("PixelGraph"))
@@ -77,7 +78,17 @@ final class UI: @unchecked Sendable {
     }
 
     /// Clears the screen, kitty's images included (clearing the text alone leaves them).
-    func clear() -> String { "\u{1B}[0m\u{1B}[2J" + (graphics == .kitty ? TerminalImage.kittyClear : "") }
+    func clear() -> String {
+        placed = [:]
+        return "\u{1B}[0m\u{1B}[2J" + (graphics == .kitty ? TerminalImage.kittyClear : "")
+    }
+
+    /// One frame of a screen, for the terminal to show all at once rather
+    /// than as it arrives (synchronized output; terminals without it
+    /// ignore the request).
+    func frame(_ drawing: String) -> String {
+        drawing.isEmpty ? drawing : "\u{1B}[?2026h" + drawing + "\u{1B}[?2026l"
+    }
 
     // MARK: Text
 
@@ -311,8 +322,10 @@ final class UI: @unchecked Sendable {
     private typealias Box = (row: Int, col: Int, cols: Int, rows: Int)
 
     /// A photo file drawn into `cols` × `rows` cells, letterboxed, optionally
-    /// muted. Zooming in is `zoomed`.
-    func image(_ url: URL, row: Int, col: Int, cols: Int, rows: Int, dim: Bool, large: Bool = false) -> String {
+    /// muted. Zooming in is `zoomed`; `replacing` is for a box that's also
+    /// drawn that way, so what the zoomed photo covered is tidied up.
+    func image(_ url: URL, row: Int, col: Int, cols: Int, rows: Int, dim: Bool, large: Bool = false,
+               replacing: Bool = false) -> String {
         guard cols > 0, rows > 0 else { return "" }
         let key = url.path + (dim ? "|dim" : "")
         if let graphics {
@@ -332,7 +345,7 @@ final class UI: @unchecked Sendable {
                 }
             }
             guard let data = encoded[sized] else { return at(row, col) + self.dim("no preview") }
-            return place(data, box)
+            return place(data, box, replacing: replacing ? (row, col, cols, rows) : nil)
         }
         let blockKey = key + "|\(cols)x\(rows)"
         if blocks[blockKey] == nil {
@@ -346,20 +359,41 @@ final class UI: @unchecked Sendable {
 
     /// Part of a big picture, cut out and drawn to fill the box: how the
     /// review zooms in. Drawn fresh each time, since every step and move
-    /// shows something different.
-    func zoomed(_ source: CGImage, crop: CGRect, row: Int, col: Int, cols: Int, rows: Int) -> String {
-        guard cols > 0, rows > 0, let cut = TerminalImage.crop(source, to: crop) else { return "" }
+    /// shows something different, and over what was there, so zooming
+    /// never blanks the screen. `quick` is for the frames of a gesture:
+    /// half the pixels, to keep up with the fingers.
+    func zoomed(_ source: CGImage, crop: CGRect, row: Int, col: Int, cols: Int, rows: Int, quick: Bool = false) -> String {
+        guard cols > 0, rows > 0 else { return "" }
         guard let graphics else {
+            guard let cut = TerminalImage.crop(source, to: crop) else { return "" }
             return TerminalImage.blocks(cut, cols: cols, rows: rows).enumerated().map { at(row + $0.offset, col) + $0.element }.joined()
         }
-        let box = fit((cut.width, cut.height), in: (row, col, cols, rows))
-        // Exactly as many pixels as the box has on screen: fewer keeps each
-        // step quick, and a small cut is enlarged smoothly here rather than
-        // stretched into blocks by the terminal.
-        let side = boxPixels(cols: box.cols, rows: box.rows)
-        let picture = max(cut.width, cut.height) == side ? cut : TerminalImage.scaled(cut, maxSide: side, enlarge: true) ?? cut
-        guard let data = graphics == .kitty ? TerminalImage.png(picture) : TerminalImage.jpeg(picture) else { return "" }
-        return place(data, box)
+        // Where the shown part sits in the box, to the pixel: centred, and
+        // all of the box once the photo is bigger than it.
+        let cell = cellSize
+        let boxWidth = Double(cols) * cell.width, boxHeight = Double(rows) * cell.height
+        let shown = Double(source.width) * crop.width / max(1, Double(source.height) * crop.height)
+        let width = min(boxWidth, boxHeight * shown), height = min(boxHeight, boxWidth / shown)
+        let x = (boxWidth - width) / 2, y = (boxHeight - height) / 2
+        // A picture takes whole cells: the ones this touches. It's drawn
+        // where it belongs inside them, so it grows smoothly instead of a
+        // cell at a time, and what's left of them is the background.
+        let left = Int((x / cell.width + 0.001).rounded(.down)), right = min(cols, Int(((x + width) / cell.width - 0.001).rounded(.up)))
+        let top = Int((y / cell.height + 0.001).rounded(.down)), bottom = min(rows, Int(((y + height) / cell.height - 0.001).rounded(.up)))
+        let box: Box = (row + top, col + left, max(1, right - left), max(1, bottom - top))
+        let scale = pixelScale(cols: box.cols, rows: box.rows) * (quick ? 0.5 : 1)
+        let rect = CGRect(x: (x - Double(left) * cell.width) * scale, y: (y - Double(top) * cell.height) * scale,
+                          width: width * scale, height: height * scale)
+        // kitty's pictures can be see-through; iTerm2's JPEGs can't.
+        let background: Theme.RGB? = graphics == .kitty ? nil : Theme.background ?? (Theme.light ? (255, 255, 255) : (0, 0, 0))
+        guard let picture = TerminalImage.canvas(source, crop: crop, into: rect,
+                                                 width: max(1, Int((Double(box.cols) * cell.width * scale).rounded())),
+                                                 height: max(1, Int((Double(box.rows) * cell.height * scale).rounded())),
+                                                 background: background, quick: quick),
+              let data = graphics == .kitty ? TerminalImage.png(picture) : TerminalImage.jpeg(picture, quality: quick ? 0.6 : 0.9)
+        else { return "" }
+        // Made the shape of its cells, so it covers every bit of them.
+        return place(data, box, replacing: (row, col, cols, rows), stretch: true)
     }
 
     /// A picture made on the fly (the font preview in Settings), drawn like a
@@ -393,15 +427,89 @@ final class UI: @unchecked Sendable {
         return box
     }
 
+    /// Where the last picture went in each box that's redrawn in place.
+    private var placed: [String: Box] = [:]
+
     /// Puts encoded picture data on screen, the way this terminal takes it.
-    private func place(_ data: Data, _ box: Box) -> String {
+    /// In a box that's redrawn in place (`full`, while zooming), whatever
+    /// the last picture covered and this one doesn't is cleared too.
+    private func place(_ data: Data, _ box: Box, replacing full: Box? = nil, stretch: Bool = false) -> String {
+        var tidy = ""
+        if let full {
+            let key = "\(full.row);\(full.col);\(full.cols);\(full.rows)"
+            if let old = placed[key], old != box {
+                if graphics == .kitty {
+                    // A picture somewhere else has another id: take the old one away.
+                    if old.row != box.row || old.col != box.col { tidy = "\u{1B}_Ga=d,d=I,i=\(old.row * 1000 + old.col),q=2\u{1B}\\" }
+                } else {
+                    tidy = blank(full, around: box)
+                }
+            }
+            placed[key] = box
+        }
         switch graphics {
         case .kitty:
             // One id per spot on screen, so a redrawn tile replaces its picture.
-            TerminalImage.kitty(data, id: box.row * 1000 + box.col, row: box.row, col: box.col, cols: box.cols, rows: box.rows)
+            return tidy + TerminalImage.kitty(data, id: box.row * 1000 + box.col, row: box.row, col: box.col, cols: box.cols, rows: box.rows)
         default:
-            TerminalImage.iTerm(data, row: box.row, col: box.col, cols: box.cols, rows: box.rows)
+            return tidy + TerminalImage.iTerm(data, row: box.row, col: box.col, cols: box.cols, rows: box.rows, stretch: stretch)
         }
+    }
+
+    /// Empties the cells of `full` outside `box`: iTerm2's pictures live in
+    /// cells, and go when the cells are written over.
+    private func blank(_ full: Box, around box: Box) -> String {
+        var out = "\u{1B}[0m"
+        for r in full.row..<(full.row + full.rows) {
+            guard r >= box.row, r < box.row + box.rows else {
+                out += at(r, full.col) + String(repeating: " ", count: full.cols)
+                continue
+            }
+            let before = box.col - full.col, after = full.col + full.cols - (box.col + box.cols)
+            if before > 0 { out += at(r, full.col) + String(repeating: " ", count: before) }
+            if after > 0 { out += at(r, box.col + box.cols) + String(repeating: " ", count: after) }
+        }
+        return out
+    }
+
+    /// Pictures here live in cells, so they move when the screen is scrolled
+    /// and only the rows that come into view need drawing. kitty's don't.
+    var scrollsPictures: Bool { graphics != .kitty }
+
+    /// How many pixels a picture covering this many cells should have.
+    func pixels(cols: Int, rows: Int) -> (width: Int, height: Int) {
+        let cell = cellSize, scale = pixelScale(cols: cols, rows: rows)
+        return (max(1, Int((Double(cols) * cell.width * scale).rounded())), max(1, Int((Double(rows) * cell.height * scale).rounded())))
+    }
+
+    /// A picture made the shape of `cols` × `total` cells, or just the rows
+    /// `rows` of it, drawn with its first row shown at `row`: how a grid of
+    /// photos shows a tile that's only partly in view.
+    func tile(_ picture: CGImage, rows: Range<Int>, of total: Int, row: Int, col: Int, cols: Int) -> String {
+        guard let graphics, !rows.isEmpty, total > 0 else { return "" }
+        let height = Double(picture.height) / Double(total)
+        let top = (Double(rows.lowerBound) * height).rounded(), bottom = (Double(rows.upperBound) * height).rounded()
+        let cut = rows.count == total ? picture
+            : picture.cropping(to: CGRect(x: 0, y: top, width: Double(picture.width), height: max(1, bottom - top)))
+        guard let cut, let data = graphics == .kitty ? TerminalImage.png(cut) : TerminalImage.jpeg(cut, quality: 0.85) else { return "" }
+        return place(data, (row, col, cols, rows.count), stretch: true)
+    }
+
+    /// A cell's size as the terminal reports it; the usual 8 × 16 when it doesn't say.
+    var cellSize: (width: Double, height: Double) {
+        let window = term.pixelSize, size = term.size
+        guard window.width > 0, window.height > 0, size.cols > 0, size.rows > 0 else { return (8, 16) }
+        return (Double(window.width) / Double(size.cols), Double(window.height) / Double(size.rows))
+    }
+
+    /// Picture pixels for each unit of that size, for a picture this many
+    /// cells big: the display's scale (terminals may report points, not
+    /// pixels), but never more than 2048 pixels on the long side.
+    private func pixelScale(cols: Int, rows: Int) -> Double {
+        let cell = cellSize
+        let long = max(Double(cols) * cell.width, Double(rows) * cell.height)
+        let display = CGDisplayCopyDisplayMode(CGMainDisplayID()).map { Double($0.pixelWidth) / Double(max(1, $0.width)) } ?? 1
+        return min(max(1, display), 2048 / max(1, long))
     }
 
     private var sizes: [String: (width: Int, height: Int)] = [:]

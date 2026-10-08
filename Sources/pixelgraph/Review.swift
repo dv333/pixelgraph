@@ -40,6 +40,17 @@ final class ReviewSession {
     /// them could only be had as the preview.
     private var originals: [String: CGImage] = [:]
     private var previewOnly: Set<String> = []
+    /// Photos zoomed from their preview so far, mid-gesture: the full-size
+    /// copy is fetched once the fingers rest.
+    private var standIns: Set<String> = []
+    /// The key being handled is part of a gesture (the wheel, a drag), so
+    /// the photo is drawn quickly; whether what's on screen was, and is
+    /// owed a sharp frame; and whether the photo is to be drawn again where
+    /// it is although nothing about it moved.
+    private var live = false
+    private var rough = false
+    private var redrawLook = false
+    private var frameStarted = Date.distantPast
     /// Faces found in each photo looked at closely, and its width ÷ height.
     private var faceInfo: [String: (boxes: [CGRect], aspect: Double)] = [:]
     private var scroll = 0
@@ -139,12 +150,39 @@ final class ReviewSession {
         if let start, let index = groupIndex(start) { open(index) }
         draw()
         while true {
-            let key = ui.term.nextKey()
+            let looking = (screen == .photo || screen == .compare) && sheet == nil
+            let key: Terminal.Key
+            if looking {
+                // Zooming and dragging follow the fingers with quick frames,
+                // no faster than a display shows them (what arrives meanwhile
+                // goes into the next one). Once the fingers rest, the photo
+                // is drawn again sharp; and if they stay at rest, from its
+                // full-size copy, which can take a moment to fetch.
+                let early = 1.0 / 60 - Date.now.timeIntervalSince(frameStarted)
+                if rough, early > 0 { usleep(UInt32(early * 1_000_000)) }
+                let fetch = !rough && zoom > 1 && !standIns.isEmpty
+                guard let next = ui.term.nextKey(live: rough ? 150 : fetch ? 350 : nil) else {
+                    live = false
+                    if fetch { await loadOriginals() }
+                    redrawLook = true
+                    draw()
+                    rough = false
+                    continue
+                }
+                key = next
+                frameStarted = .now
+            } else {
+                key = ui.term.nextKey()
+            }
             // The wheel only scrolls the groups; elsewhere it changes nothing,
             // so don't redraw for it.
             if case .scroll = key, sheet != nil { continue }
             // Drags only move a zoomed photo; elsewhere they change nothing.
             if case .drag = key, !(zoom > 1 && (screen == .photo || screen == .compare)) { continue }
+            switch key {
+            case .scroll, .drag: live = looking
+            default: live = false
+            }
             if let outcome = await handle(key) { return outcome }
             noteSeen()
             announceIfDone()
@@ -252,7 +290,8 @@ final class ReviewSession {
             case .char("v"): overview = overview == .mosaic ? .filmstrip : .mosaic; scroll = 0
             case .char("a"): acceptClear()
             case .char("m"): askToMove(everything: true)
-            case .char("R"):
+            // Letters arrive lower-case: this is R with or without shift.
+            case .char("r"):
                 guard run.source != nil else {
                     toast = ui.dim("This scan is too old to scan again from here; start it from the start screen.")
                     break
@@ -364,7 +403,7 @@ final class ReviewSession {
             case .char("+"), .char("="): stepZoom(1)
             case .char("-"): stepZoom(-1)
             case .char("0"): resetZoom()
-            case .scroll(let ticks) where ticks != 0: stepZoom(ticks < 0 ? 1 : -1)
+            case .scroll(let ticks) where ticks != 0: wheelZoom(ticks)
             case .left, .up, .char("p"): stepPhoto(-1)
             case .right, .down, .char("n"): stepPhoto(1)
             case .home: cursor = 0
@@ -398,7 +437,7 @@ final class ReviewSession {
             case .char("+"), .char("="): stepZoom(1)
             case .char("-"): stepZoom(-1)
             case .char("0"): resetZoom()
-            case .scroll(let ticks) where ticks != 0: stepZoom(ticks < 0 ? 1 : -1)
+            case .scroll(let ticks) where ticks != 0: wheelZoom(ticks)
             case .right, .down, .char("n"): stepCandidate(1)
             case .left, .char("p"): stepCandidate(-1)
             case .up, .tab: swap(&pinned, &cursor)
@@ -483,9 +522,7 @@ final class ReviewSession {
 
     /// + and −: the next step in or out; back at 1, the whole photo again.
     private func stepZoom(_ direction: Int) {
-        let steps = Zoom.steps
-        let here = direction > 0 ? steps.lastIndex { $0 <= zoom + 0.001 } ?? 0 : steps.firstIndex { $0 >= zoom - 0.001 } ?? 0
-        zoom = steps[min(max(0, here + direction), steps.count - 1)]
+        zoom = Zoom.stepped(zoom, direction)
         if zoom == 1 { center = CGPoint(x: 0.5, y: 0.5) }
     }
 
@@ -495,14 +532,39 @@ final class ReviewSession {
         dragFrom = nil
     }
 
+    /// The wheel, or two fingers on a trackpad: zooms a little for each
+    /// tick, keeping the spot under the pointer where it is.
+    private func wheelZoom(_ ticks: Int) {
+        let next = Zoom.wheeled(zoom, ticks: ticks)
+        guard next != zoom else { return }
+        guard next > 1 else { return resetZoom() }
+        let frames = lookFrames()
+        var frame = frames[0], point = CGPoint(x: 0.5, y: 0.5)
+        if let at = ui.term.pointer, let under = frames.first(where: {
+            ($0.row..<($0.row + $0.box.rows)).contains(at.row) && ($0.col..<($0.col + $0.box.cols)).contains(at.col)
+        }) {
+            frame = under
+            point = CGPoint(x: (Double(at.col - under.col) + 0.5) / Double(under.box.cols),
+                            y: (Double(at.row - under.row) + 0.5) / Double(under.box.rows))
+        }
+        center = Zoom.center(zoomingTo: next, from: zoom, center: center, about: point,
+                             aspect: aspect(order[frame.index]), boxAspect: boxAspect(frame.box))
+        zoom = next
+    }
+
+    /// Where photos are drawn when looking closer (one) or comparing (two):
+    /// whose photo, its top-left cell and its box.
+    private func lookFrames() -> [(index: Int, row: Int, col: Int, box: (cols: Int, rows: Int))] {
+        guard screen == .compare else { return [(cursor, 3, 2, photoBox)] }
+        let paneWidth = (ui.cols - 5) / 2
+        return [(pinned, 4, 3, compareBox), (cursor, 4, 3 + paneWidth + 3, compareBox)]
+    }
+
     /// Moves what's shown by a share of what's on screen (0.25 = a quarter),
     /// stopping at the photo's edges.
     private func pan(_ dx: Double, _ dy: Double, _ box: (cols: Int, rows: Int)) {
         let member = screen == .compare ? order[pinned] : order[cursor]
-        let shown = Zoom.crop(zoom: zoom, center: center, aspect: aspect(member), boxAspect: boxAspect(box))
-        let moved = Zoom.crop(zoom: zoom, center: CGPoint(x: shown.midX + dx * shown.width, y: shown.midY + dy * shown.height),
-                              aspect: aspect(member), boxAspect: boxAspect(box))
-        center = CGPoint(x: moved.midX, y: moved.midY)
+        center = Zoom.panned(center, dx: dx, dy: dy, zoom: zoom, aspect: aspect(member), boxAspect: boxAspect(box))
     }
 
     /// A drag on a zoomed photo moves it with the mouse.
@@ -547,13 +609,24 @@ final class ReviewSession {
         let wanted = screen == .photo ? [order[cursor]] : [order[pinned], order[cursor]]
         let ids = Set(wanted.map(\.id))
         originals = originals.filter { ids.contains($0.key) }
+        standIns.formIntersection(ids)
         let offline = settings.bool(.offline)
-        for member in wanted where originals[member.id] == nil {
+        for member in wanted where originals[member.id] == nil || (!live && standIns.contains(member.id)) {
+            let preview = standIns.contains(member.id) ? originals[member.id]
+                : images[member.id].flatMap { TerminalImage.load(folder.appendingPathComponent($0.full), maxSide: 2048) }
+            // Mid-gesture, zoom what's already here; fetching can wait.
+            if live, let preview {
+                originals[member.id] = preview
+                standIns.insert(member.id)
+                continue
+            }
+            standIns.remove(member.id)
             let item = Items.lookup([member.id])[member.id]
             var image: CGImage?
             switch item?.backing {
             case .photo(let asset)?:
                 ui.term.write(ui.progress(offline ? "Getting the full-size photo…" : "Getting the full-size photo, from iCloud if need be…"))
+                needsFull = true
                 image = await Library.fullSize(asset, maxSide: 4096, download: !offline)
             case .file?:
                 image = await item?.image(maxSide: 4096, fetch: offline ? .localOnly : .download(timeout: 30))
@@ -561,7 +634,6 @@ final class ReviewSession {
                 // Moved since: what's still at its old path, if anything.
                 if member.id.hasPrefix("file:") { image = TerminalImage.load(URL(fileURLWithPath: String(member.id.dropFirst(5))), maxSide: 4096) }
             }
-            let preview = images[member.id].flatMap { TerminalImage.load(folder.appendingPathComponent($0.full), maxSide: 2048) }
             if let full = image, max(full.width, full.height) >= max(preview?.width ?? 0, preview?.height ?? 0) {
                 originals[member.id] = full
                 previewOnly.remove(member.id)
@@ -576,10 +648,11 @@ final class ReviewSession {
     private func drawPhoto(_ member: Run.Member, row: Int, col: Int, _ box: (cols: Int, rows: Int)) -> String {
         if zoom > 1, let source = originals[member.id] {
             let crop = Zoom.crop(zoom: zoom, center: center, aspect: Double(source.width) / Double(max(1, source.height)), boxAspect: boxAspect(box))
-            return ui.zoomed(source, crop: crop, row: row, col: col, cols: box.cols, rows: box.rows)
+            return ui.zoomed(source, crop: crop, row: row, col: col, cols: box.cols, rows: box.rows, quick: live)
         }
         guard let files = images[member.id] else { return "" }
-        return ui.image(folder.appendingPathComponent(files.full), row: row, col: col, cols: box.cols, rows: box.rows, dim: false, large: true)
+        return ui.image(folder.appendingPathComponent(files.full), row: row, col: col, cols: box.cols, rows: box.rows, dim: false, large: true,
+                        replacing: true)
     }
 
     /// Compare starts with the best shot pinned on the left and the photo
@@ -1218,6 +1291,14 @@ final class ReviewSession {
         return "\(s) \(ui.cols)x\(ui.rows) \(sheet == nil)"
     }
 
+    /// Which photos are being looked at closely, whatever the zoom: while
+    /// this stays the same, they're redrawn where they are.
+    private func lookKey() -> String? {
+        guard screen == .photo || screen == .compare, sheet == nil else { return nil }
+        return "\(screen) \(groupIndex) \(pinned) \(cursor) \(ui.cols)x\(ui.rows)"
+    }
+    private var drawnLook: String?
+
     private var selection: Int { screen == .groups ? groupIndex : cursor }
 
     /// Redraws only what changed when the screen is otherwise the same:
@@ -1243,8 +1324,16 @@ final class ReviewSession {
         // isn't sent again. A message that's gone needs the line it covered.
         let still = (screen == .photo || screen == .compare) && changed.isEmpty && !(drawnToast != nil && toast == nil)
         let partial = !needsFull && sheet == nil && key == drawnFrame && (screen == .groups || screen == .group || still)
+        // Zooming and moving around a photo draws over what's there: the
+        // screen is never wiped first, so there's nothing to flicker. The
+        // same goes for the sharp frames owed after a gesture's quick ones.
+        let look = lookKey()
+        let inPlace = !needsFull && still && look != nil && look == drawnLook && (key != drawnFrame || redrawLook)
+        redrawLook = false
         var out: String
-        if partial, screen == .photo || screen == .compare {
+        if inPlace {
+            out = screen == .photo ? photoView() : compareView()
+        } else if partial, screen == .photo || screen == .compare {
             out = ""
         } else if partial {
             out = ""
@@ -1276,8 +1365,10 @@ final class ReviewSession {
                              keys: "esc keep this review", buttons: ui.button("enter Scan again"))
         case nil: break
         }
-        ui.term.write(out)
+        ui.term.write(ui.frame(out))
         drawnFrame = key
+        drawnLook = look
+        if !out.isEmpty { rough = live && look != nil && zoom > 1 && ui.sharp }
         drawnSelection = selection
         drawnToast = toast
         changed = []
@@ -1856,8 +1947,10 @@ final class ReviewSession {
             + (previewOnly.contains(member.id) ? ui.amber(" · preview only") : "") + ui.dim(" · 0 whole photo") : ""
         let header = crumbs(group: true) + ui.bold("Photo \(cursor + 1) of \(order.count)") + ui.dim(" · ")
             + Format.day.string(from: member.date) + "  " + status + zoomNote
-        var out = ui.at(1, 2) + ui.clip(header, cols - 2)
-        out += drawPhoto(member, row: 3, col: 2, photoBox)
+        // Redrawn in place while zooming: clear what a longer header left.
+        var out = ui.at(1, 2) + ui.clip(header, cols - 2) + "\u{1B}[K"
+        let frame = lookFrames()[0]
+        out += drawPhoto(member, row: frame.row, col: frame.col, frame.box)
         let about = tab == .documents
             ? [member.document, member.excerpt.map { "“" + $0 + "”" }].compactMap { $0 }.joined(separator: "  ")
             : self.about(member)
@@ -1883,7 +1976,7 @@ final class ReviewSession {
         let position = (candidates.firstIndex(of: cursor) ?? 0) + 1
         var out = ui.at(1, 2) + ui.clip(crumbs(group: true) + ui.bold("Compare")
             + ui.dim(" · candidate \(position) of \(candidates.count)")
-            + (zoom > 1 ? ui.dim("  · ") + ui.blue(Zoom.label(zoom)) + ui.dim(" · 0 whole photos") : ""), cols - 2)
+            + (zoom > 1 ? ui.dim("  · ") + ui.blue(Zoom.label(zoom)) + ui.dim(" · 0 whole photos") : ""), cols - 2) + "\u{1B}[K"
 
         let paneWidth = (cols - 5) / 2
         let imageRows = max(4, rows - 9)
@@ -1895,7 +1988,8 @@ final class ReviewSession {
             let paint: (String) -> String = { [ui] in side == 1 ? ui.blue($0) : ui.gray($0) }
             out += ui.box(row: 3, col: c, width: paneWidth, height: imageRows + 2,
                           label: title + label(s, number: index + 1), paint: paint, heavy: side == 1)
-            out += drawPhoto(member, row: 4, col: c + 1, (paneWidth - 2, imageRows))
+            let frame = lookFrames()[side]
+            out += drawPhoto(member, row: frame.row, col: frame.col, frame.box)
             let lines = caption(member.id, s, width: paneWidth)
             out += ui.at(imageRows + 6, c) + (lines.first ?? "")
             out += ui.at(imageRows + 7, c) + ui.dim(ui.fit(meta(member, short: false), paneWidth))

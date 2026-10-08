@@ -291,6 +291,13 @@ enum Files {
         }
     }
 
+    /// True for a folder that has a Photos library in it (as Pictures
+    /// usually does): its photos are reached through Photos, not as files.
+    static func holdsPhotosLibrary(_ folder: URL) -> Bool {
+        let contents = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+        return contents.contains { $0.pathExtension.lowercased() == "photoslibrary" }
+    }
+
     /// The other files that belong to a shot: its RAW or JPEG twin and sidecars.
     static func companions(of url: URL) -> [URL] {
         let base = url.deletingPathExtension()

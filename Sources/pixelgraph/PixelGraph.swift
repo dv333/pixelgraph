@@ -13,7 +13,7 @@ struct PixelGraph: AsyncParsableCommand {
             Nothing moves until you confirm, and every move can be undone.
             """,
         version: "0.2.0",
-        subcommands: [Home.self, Scan.self, Review.self, ReportCommand.self, Undo.self, Albums.self, Eval.self,
+        subcommands: [Home.self, Scan.self, Review.self, GalleryCommand.self, ReportCommand.self, Undo.self, Albums.self, Eval.self,
                       MCPCommand.self, Auto.self, Schedule.self, Empty.self, SettingsCommand.self, DebugImages.self],
         defaultSubcommand: Home.self
     )
@@ -155,6 +155,63 @@ struct Scan: AsyncParsableCommand {
         } else {
             print("\nReview with `pixelgraph review`, or open the report with `pixelgraph report`.")
         }
+    }
+}
+
+// MARK: - gallery
+
+struct GalleryCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "gallery",
+        abstract: "Look through an album, date range or folder, or your whole library. Changes nothing.")
+
+    @Option(help: "Apple Photos album to look through (see `pixelgraph albums`).")
+    var album: String?
+
+    @Option(help: "Folder to look through: on this Mac, an external drive or iCloud Drive.")
+    var folder: String?
+
+    @Option(help: "Photos library from this date: 2024, 2024-06 or 2024-06-15.")
+    var from: String?
+
+    @Option(help: "Photos library up to this date, inclusive.")
+    var to: String?
+
+    func validate() throws {
+        if [album != nil, folder != nil, from != nil || to != nil].filter({ $0 }).count > 1 {
+            throw ValidationError("Choose one of --album, --folder or --from/--to, or none for your whole library.")
+        }
+        _ = try DateArgument.parse(from, end: false)
+        _ = try DateArgument.parse(to, end: true)
+    }
+
+    func run() async throws {
+        guard isatty(STDIN_FILENO) != 0, isatty(STDOUT_FILENO) != 0 else {
+            throw ValidationError("Run pixelgraph gallery in a terminal.")
+        }
+        let source: Source
+        if let folder {
+            source = .folder(URL(fileURLWithPath: (folder as NSString).expandingTildeInPath))
+        } else {
+            try await Library.requestAccess()
+            if let album {
+                guard let found = Library.album(named: album) else { throw PixelGraphError.albumNotFound(album) }
+                source = .album(id: found.localIdentifier, title: album)
+            } else {
+                source = .dates(from: try DateArgument.parse(from, end: false), to: try DateArgument.parse(to, end: true))
+            }
+        }
+        let items = try Items.load(source)
+        guard !items.isEmpty else {
+            if case .folder(let path) = source, Files.holdsPhotosLibrary(URL(fileURLWithPath: path)) {
+                print("No photo files in \(source.description): its photos are in your Photos library. "
+                      + "Run `pixelgraph gallery` on its own to look through that, or with --album.")
+            } else {
+                print("No photos in \(source.description).")
+            }
+            return
+        }
+        _ = await GallerySession(source: source, items: items, graphics: Settings.load().graphics).show()
     }
 }
 

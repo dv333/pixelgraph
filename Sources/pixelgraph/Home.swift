@@ -140,6 +140,8 @@ final class App {
                     if try await follow(start(source)) == .quit { return }
                 case .resume(let id):
                     if try await follow(resume(id)) == .quit { return }
+                case .gallery(let source):
+                    if await gallery(source) == .quit { return }
                 case .settings:
                     openSettings()
                 case .empty:
@@ -150,7 +152,7 @@ final class App {
         }
     }
 
-    private enum Action { case quit, scan(Source), resume(String?), settings, empty }
+    private enum Action { case quit, scan(Source), resume(String?), gallery(Source), settings, empty }
 
     /// Enter on something to scan: scans it with your settings, straight
     /// away. Only a scan that would start a review in progress over asks
@@ -158,18 +160,23 @@ final class App {
     private func start(_ source: Source) async throws -> ReviewSession.Outcome {
         settings = Settings.load()
         options = flags.scanner(settings)
-        if let current = try? Run.load(), current.source == source, current.waiting > 0 {
-            replacing = (current.scope, current.waiting)
-        } else if let aside = Reviews.aside().first(where: { $0.source == source }) {
-            replacing = (aside.scope, aside.waiting)
-        } else {
-            replacing = nil
-        }
+        replacing = reviewInProgress(of: source)
         guard replacing == nil else {
             rescanning = source
             return .home
         }
         return try await scan(source)
+    }
+
+    /// The review in progress that scanning `source` would start over, if any.
+    private func reviewInProgress(of source: Source) -> (scope: String, waiting: Int)? {
+        if let current = try? Run.load(), current.source == source, current.waiting > 0 {
+            return (current.scope, current.waiting)
+        }
+        if let aside = Reviews.aside().first(where: { $0.source == source }) {
+            return (aside.scope, aside.waiting)
+        }
+        return nil
     }
 
     /// The Settings screen, then back here with the new settings in use.
@@ -404,7 +411,14 @@ final class App {
             if case .browser(let url) = screen { return .scan(.folder(url)) }
         case .char(","): return .settings
         case .char("p"): togglePin()
-        case .char("R"): askRescan()
+        case .char("g"):
+            guard let source = place() else {
+                message = ui.dim("g looks through the photos of an album, month or folder: highlight one")
+                break
+            }
+            return .gallery(source)
+        // Letters arrive lower-case: this is R with or without shift.
+        case .char("r"): askRescan()
         case .char("?"): showingKeys = true
         case .home: selected = rows.firstIndex(where: isSelectable) ?? selected
         case .end: selected = rows.lastIndex(where: isSelectable) ?? selected
@@ -413,21 +427,26 @@ final class App {
         return nil
     }
 
-    /// R on a review in progress: scan that place again from scratch,
-    /// after asking in the bar.
+    /// R on a review in progress, or on a folder's own page: scan that
+    /// place again from scratch, after asking in the bar.
     private func askRescan() {
-        guard rows.indices.contains(selected), case .resume(let id, let scope, let waiting, _, _) = rows[selected] else {
+        let source: Source
+        if rows.indices.contains(selected), case .resume(let id, let scope, let waiting, _, _) = rows[selected] {
+            guard let found = id == nil ? (try? Run.load())?.source : Reviews.aside().first(where: { $0.id == id })?.source else {
+                message = ui.red("That review can't be scanned again from here")
+                return
+            }
+            source = found
+            replacing = (scope, waiting)
+        } else if case .browser(let url) = screen {
+            source = .folder(url)
+            replacing = reviewInProgress(of: source)
+        } else {
             message = ui.dim("R scans a review in progress again: highlight one under Continue reviewing")
-            return
-        }
-        let source = id == nil ? (try? Run.load())?.source : Reviews.aside().first { $0.id == id }?.source
-        guard let source else {
-            message = ui.red("That review can't be scanned again from here")
             return
         }
         settings = Settings.load()
         options = flags.scanner(settings)
-        replacing = (scope, waiting)
         rescanning = source
     }
 
@@ -442,6 +461,36 @@ final class App {
             outcome = try await scan(source, again: true)
         }
         return outcome
+    }
+
+    /// The place the highlighted row stands for (or, on a folder's own
+    /// page, that folder), to look through its photos.
+    private func place() -> Source? {
+        guard rows.indices.contains(selected) else { return nil }
+        switch rows[selected] {
+        case .source(let source, _), .month(let source, _), .range(let source, _, _): return source
+        case .year(_, let months, _): return Source.selection(of: months)
+        case .resume(let id, _, _, _, _): return id == nil ? (try? Run.load())?.source : Reviews.aside().first { $0.id == id }?.source
+        case .scanHere(let url, _), .folder(let url), .browse(let url, _, _): return .folder(url)
+        default:
+            if case .browser(let url) = screen { return .folder(url) }
+            return nil
+        }
+    }
+
+    /// g: the gallery for a place, then back here as it was.
+    private func gallery(_ source: Source) async -> GallerySession.Outcome {
+        ui.term.write(ui.progress("Opening \(ui.fit(source.description, 40))…"))
+        drawnFrame = nil
+        guard let items = try? Items.load(source), !items.isEmpty else {
+            if case .folder(let path) = source, Files.holdsPhotosLibrary(URL(fileURLWithPath: path)) {
+                message = ui.dim("No photo files in \(source.description): its photos are in your Photos library, under Albums and Months")
+            } else {
+                message = ui.dim("No photos in \(source.description)")
+            }
+            return .back
+        }
+        return await GallerySession(source: source, items: items, ui: ui).show()
     }
 
     /// The folder a row stands for, if any.
@@ -777,6 +826,13 @@ final class App {
                                           + "pick it under Continue reviewing to go back to it instead"),
                              keys: "esc keep it", buttons: ui.button("enter Scan again"))
         }
+        if let source = rescanning {
+            // No review to lose: say whether it has been scanned before.
+            let before = source.places.contains { statuses[$0] != nil }
+            return ui.prompt("Scan \(ui.fit(source.description, 30))\(before ? " again" : "")?",
+                             note: ui.dim("From scratch, with your settings" + (before ? "; photos already moved stay moved" : "")),
+                             keys: "esc cancel", buttons: ui.button(before ? "enter Scan again" : "enter Scan"))
+        }
         if let due = emptying {
             func count(_ n: Int, _ what: String) -> String { "\(n) \(what)\(n == 1 ? "" : "s")" }
             var what: [String] = []
@@ -801,9 +857,11 @@ final class App {
             sections.append(("Months", [("space", "tick a month, or a whole year"), ("x", "tick every month from the last one ticked"),
                                         ("c", "clear the ticks"), ("enter", "scan what's ticked")]))
         case .browser:
-            sections.append(("Folders", [("s", "scan this folder, and the folders in it"), ("p", "pin a folder to the start screen")]))
+            sections.append(("Folders", [("s", "scan this folder, and the folders in it"), ("R", "scan it again, from scratch; asks first"),
+                                         ("g", "look through its photos, without scanning"), ("p", "pin a folder to the start screen")]))
         case .home:
             sections.append(("Reviews", [("R", "scan a review in progress again, from scratch")]))
+            sections.append(("Photos", [("g", "look through an album's, month's or folder's photos, without scanning")]))
             sections.append(("Folders", [("p", "pin a folder to the start screen; again to unpin")]))
         case .folders:
             sections.append(("Folders", [("p", "pin a folder to the start screen; again to unpin")]))

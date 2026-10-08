@@ -717,3 +717,83 @@ private func member(_ id: String, sharpness: Float = 0.01, aesthetic: Float = 0)
     #expect(abs(Zoom.level(showing: twice, aspect: 4.0 / 3, boxAspect: 2) - 2) < 1e-9)
     #expect(Zoom.label(2) == "2×" && Zoom.label(1.5) == "1.5×")
 }
+
+@Test func zoomingWithTheWheelKeepsTheSpotUnderThePointer() {
+    // A 4:3 photo in a 2:1 box. The spot of the photo under a point of the box:
+    func spot(_ point: CGPoint, zoom: Double, center: CGPoint) -> CGPoint {
+        let crop = Zoom.crop(zoom: zoom, center: center, aspect: 4.0 / 3, boxAspect: 2)
+        let placed = Zoom.placement(crop: crop, aspect: 4.0 / 3, boxAspect: 2)
+        return CGPoint(x: crop.minX + (point.x - placed.minX) / placed.width * crop.width,
+                       y: crop.minY + (point.y - placed.minY) / placed.height * crop.height)
+    }
+    // Whole, it's as tall as the box and two thirds as wide, in the middle; from 1.5× it fills the box.
+    let whole = Zoom.placement(crop: CGRect(x: 0, y: 0, width: 1, height: 1), aspect: 4.0 / 3, boxAspect: 2)
+    #expect(abs(whole.width - 2.0 / 3) < 1e-9 && abs(whole.minX - 1.0 / 6) < 1e-9 && whole.height == 1)
+    let filled = Zoom.placement(crop: Zoom.crop(zoom: 2, center: CGPoint(x: 0.5, y: 0.5), aspect: 4.0 / 3, boxAspect: 2),
+                                aspect: 4.0 / 3, boxAspect: 2)
+    #expect(abs(filled.width - 1) < 1e-9 && abs(filled.height - 1) < 1e-9)
+
+    // Zooming in step by step about a point up and to the right: what's under it stays put.
+    let pointer = CGPoint(x: 0.7, y: 0.4)
+    var zoom = 2.0, center = CGPoint(x: 0.5, y: 0.5)
+    let under = spot(pointer, zoom: zoom, center: center)
+    for _ in 0..<10 {
+        let next = zoom * Zoom.wheelStep
+        center = Zoom.center(zoomingTo: next, from: zoom, center: center, about: pointer, aspect: 4.0 / 3, boxAspect: 2)
+        zoom = next
+        let now = spot(pointer, zoom: zoom, center: center)
+        #expect(abs(now.x - under.x) < 1e-9 && abs(now.y - under.y) < 1e-9)
+    }
+    // And back out again to where it started.
+    for _ in 0..<10 {
+        let next = zoom / Zoom.wheelStep
+        center = Zoom.center(zoomingTo: next, from: zoom, center: center, about: pointer, aspect: 4.0 / 3, boxAspect: 2)
+        zoom = next
+    }
+    #expect(abs(center.x - 0.5) < 1e-6 && abs(center.y - 0.5) < 1e-6)
+
+    // In a corner the photo's edge wins: what's shown never leaves the photo.
+    let corner = Zoom.center(zoomingTo: 1.2, from: 4, center: CGPoint(x: 0.95, y: 0.95), about: CGPoint(x: 0.9, y: 0.9),
+                             aspect: 4.0 / 3, boxAspect: 2)
+    let shown = Zoom.crop(zoom: 1.2, center: corner, aspect: 4.0 / 3, boxAspect: 2)
+    #expect(shown.minX >= 0 && shown.maxX <= 1 + 1e-9 && shown.minY >= 0 && shown.maxY <= 1 + 1e-9)
+}
+
+@Test func galleryTilesFillRowsAndScrollIntoView() {
+    // 50 photos in an area 118 columns by 32 rows, tiles 12 by 6: nine a row, six rows of them.
+    let grid = GalleryGrid(count: 50, cols: 118, rows: 32, tileCols: 12, tileRows: 6)
+    #expect(grid.perRow == 9 && grid.margin == 5)
+    #expect(grid.contentRows == 36 && grid.maxTop == 4)
+    #expect(grid.span(of: 0) == 0..<6 && grid.span(of: 9) == 6..<12 && grid.span(of: 49) == 30..<36)
+
+    // What's in view at the top, and scrolled to the end: part of the first row still shows.
+    #expect(grid.indices(in: 0..<32) == 0..<50)
+    #expect(grid.indices(in: 0..<6) == 0..<9)
+    #expect(grid.indices(in: 30..<36) == 45..<50)
+    #expect(grid.indices(in: 5..<7) == 0..<18)
+
+    // The last photo needs the end; the first needs the top; one already in view stays put.
+    #expect(grid.top(showing: 49, from: 0) == 4)
+    #expect(grid.top(showing: 0, from: 4) == 0)
+    #expect(grid.top(showing: 20, from: 2) == 2)
+
+    // A click lands on the tile under it, and on nothing beside the tiles or past the last photo.
+    #expect(grid.index(row: 0, col: 5, top: 0) == 0)
+    #expect(grid.index(row: 7, col: 5 + 12 * 8 + 11, top: 0) == 17)
+    #expect(grid.index(row: 0, col: 4, top: 0) == nil)
+    #expect(grid.index(row: 31, col: 5 + 12 * 5, top: 4) == nil)
+    #expect(grid.index(row: 31, col: 5 + 12 * 4, top: 4) == 49)
+
+    // Fewer photos than fit: nothing to scroll.
+    #expect(GalleryGrid(count: 5, cols: 118, rows: 32, tileCols: 12, tileRows: 6).maxTop == 0)
+}
+
+@Test func galleryDatesReadLikeARange() {
+    let calendar = Calendar.current
+    func day(_ y: Int, _ m: Int, _ d: Int) -> Date { calendar.date(from: DateComponents(year: y, month: m, day: d, hour: 12))! }
+    #expect(GalleryDates.range(day(2025, 6, 20), day(2025, 6, 20)) == day(2025, 6, 20).formatted(.dateTime.month(.abbreviated).day().year()))
+    let sameMonth = GalleryDates.range(day(2025, 6, 19), day(2025, 6, 21))
+    #expect(sameMonth.hasSuffix("– 21, 2025") && !sameMonth.contains("("))
+    #expect(GalleryDates.range(day(2025, 6, 19), day(2025, 7, 2)).contains(" – "))
+    #expect(GalleryDates.range(day(2024, 12, 30), day(2025, 1, 2)).contains("2024") && GalleryDates.range(day(2024, 12, 30), day(2025, 1, 2)).contains("2025"))
+}

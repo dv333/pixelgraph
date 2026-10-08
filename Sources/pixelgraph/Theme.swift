@@ -46,6 +46,9 @@ enum Typeface: String, CaseIterable, Sendable {
 /// row, sheets and the bottom bar.
 enum Theme {
     nonisolated(unsafe) static var light = false
+    /// The terminal's own background colour, when it says: the edges left
+    /// around a photo that's redrawn in place are filled with it.
+    nonisolated(unsafe) static var background: RGB?
 
     typealias RGB = (r: Int, g: Int, b: Int)
 
@@ -77,16 +80,18 @@ enum Theme {
 
     /// Works out whether the terminal is light or dark: PIXELGRAPH_THEME if
     /// set, else Settings → Theme, else ask the terminal for its background
-    /// colour, else COLORFGBG.
-    static func detect() {
+    /// colour, else COLORFGBG. With `background`, the terminal is asked for
+    /// its colour even when the theme is already decided.
+    static func detect(background wanted: Bool = false) {
         let env = ProcessInfo.processInfo.environment
-        switch env["PIXELGRAPH_THEME"]?.lowercased() ?? Settings.load()[.theme] {
-        case "light": light = true; return
-        case "dark": light = false; return
-        default: break
-        }
-        if let luminance = queryBackground() {
-            light = luminance > 0.5
+        let chosen = env["PIXELGRAPH_THEME"]?.lowercased() ?? Settings.load()[.theme]
+        let decided = chosen == "light" || chosen == "dark"
+        if decided { light = chosen == "light" }
+        guard wanted || !decided else { return }
+        background = queryBackground()
+        guard !decided else { return }
+        if let color = background {
+            light = (0.2126 * Double(color.r) + 0.7152 * Double(color.g) + 0.0722 * Double(color.b)) / 255 > 0.5
         } else if let colors = env["COLORFGBG"], let bgIndex = colors.split(separator: ";").last.flatMap({ Int($0) }) {
             light = bgIndex == 7 || bgIndex == 15
         }
@@ -94,7 +99,7 @@ enum Theme {
 
     /// Sends OSC 11 ("what's your background colour?") and reads the reply,
     /// e.g. `ESC ] 11 ; rgb:ffff/ffff/ffff BEL`. Nil if the terminal doesn't answer.
-    private static func queryBackground() -> Double? {
+    private static func queryBackground() -> RGB? {
         guard isatty(STDIN_FILENO) != 0, isatty(STDOUT_FILENO) != 0 else { return nil }
         var original = termios()
         tcgetattr(STDIN_FILENO, &original)
@@ -127,6 +132,6 @@ enum Theme {
             return Double(value) / Double((1 << (4 * part.count)) - 1)
         }
         guard channels.count == 3 else { return nil }
-        return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+        return (Int((channels[0] * 255).rounded()), Int((channels[1] * 255).rounded()), Int((channels[2] * 255).rounded()))
     }
 }

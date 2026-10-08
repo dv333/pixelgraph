@@ -44,6 +44,9 @@ final class Terminal: @unchecked Sendable {
         return true
     }
 
+    /// True when a key is waiting, which is left to be read.
+    var keyPending: Bool { pending != nil || wait(0) }
+
     /// Drops any keys waiting to be read.
     func drainInput() {
         while wait(0), readByte() != nil {}
@@ -99,21 +102,38 @@ final class Terminal: @unchecked Sendable {
     /// text being typed (a folder path, a model name) needs what was typed.
     private(set) var typed: Character?
 
+    /// Where the mouse was at its last click, drag or wheel movement
+    /// (1-based), so zooming can keep the spot under it where it is.
+    private(set) var pointer: (row: Int, col: Int)?
+
     /// Blocks until a key, click, wheel movement or window resize. Wheel
     /// events that are already waiting are folded into one, so a trackpad
     /// flick can't queue up scrolling that carries on after it stops; drag
     /// events likewise come down to where the mouse is now.
     func nextKey() -> Key {
-        let key: Key
-        if let waiting = pending {
-            pending = nil
-            key = waiting
-        } else {
-            key = readKey()
-        }
+        folded(first(), dragWait: 10, scrollWait: 15)
+    }
+
+    /// For a screen that follows the fingers (zooming, dragging a photo).
+    /// Only the wheel and drag events that have already arrived are folded,
+    /// so each frame catches up with the gesture instead of waiting for it
+    /// to pause; and with `milliseconds`, nil comes back when nothing has
+    /// happened for that long: the fingers are at rest.
+    func nextKey(live milliseconds: Int32?) -> Key? {
+        if let milliseconds, pending == nil, size == lastSize, !wait(milliseconds) { return nil }
+        return folded(first(), dragWait: 0, scrollWait: 0)
+    }
+
+    private func first() -> Key {
+        guard let waiting = pending else { return readKey() }
+        pending = nil
+        return waiting
+    }
+
+    private func folded(_ key: Key, dragWait: Int32, scrollWait: Int32) -> Key {
         if case .drag = key {
             var latest = key
-            while wait(10) {
+            while wait(dragWait) {
                 let next = readKey()
                 guard case .drag = next else { pending = next; break }
                 latest = next
@@ -121,7 +141,7 @@ final class Terminal: @unchecked Sendable {
             return latest
         }
         guard case .scroll(var ticks) = key else { return key }
-        while wait(15) {
+        while wait(scrollWait) {
             let next = readKey()
             if case .scroll(let more) = next {
                 ticks += more
@@ -175,6 +195,7 @@ final class Terminal: @unchecked Sendable {
             // Mouse: ESC [ < button ; col ; row M (press) or m (release)
             let parts = String(decoding: params.dropFirst(), as: UTF8.self).split(separator: ";").compactMap { Int($0) }
             guard final == UInt8(ascii: "M"), parts.count == 3 else { return nil }
+            pointer = (parts[2], parts[1])
             switch parts[0] {
             case 0: return .click(row: parts[2], col: parts[1])
             case 32: return .drag(row: parts[2], col: parts[1])
@@ -261,9 +282,10 @@ enum TerminalImage {
         return context.makeImage()
     }
 
-    /// iTerm2 inline image placed at a cell, scaled to fit `cols` × `rows`.
-    static func iTerm(_ data: Data, row: Int, col: Int, cols: Int, rows: Int) -> String {
-        "\u{1B}[\(row);\(col)H\u{1B}]1337;File=inline=1;width=\(cols);height=\(rows);preserveAspectRatio=1;size=\(data.count):\(data.base64EncodedString())\u{07}"
+    /// iTerm2 inline image placed at a cell, scaled to fit `cols` × `rows`;
+    /// with `stretch`, to cover them exactly (for a picture made that shape).
+    static func iTerm(_ data: Data, row: Int, col: Int, cols: Int, rows: Int, stretch: Bool = false) -> String {
+        "\u{1B}[\(row);\(col)H\u{1B}]1337;File=inline=1;width=\(cols);height=\(rows);preserveAspectRatio=\(stretch ? 0 : 1);size=\(data.count):\(data.base64EncodedString())\u{07}"
     }
 
     /// A kitty graphics image (PNG) placed at a cell and scaled to `cols` ×
@@ -375,11 +397,67 @@ enum TerminalImage {
     }
 
     /// A small JPEG for iTerm2 so redrawing a screen of thumbnails stays quick.
-    static func jpeg(_ image: CGImage) -> Data? {
+    static func jpeg(_ image: CGImage, quality: Double = 0.9) -> Data? {
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
+        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
         return CGImageDestinationFinalize(destination) ? data as Data : nil
+    }
+
+    /// A tile of a grid of photos: `image` cropped to fill a picture `width`
+    /// × `height` pixels, as Photos' grid does, with `inset` pixels of
+    /// `background` (or nothing) around it for the gap between tiles, and a
+    /// border in `outline` when it's the one selected.
+    static func tile(_ image: CGImage, width: Int, height: Int, inset: Int,
+                     background: (r: Int, g: Int, b: Int)?, outline: (r: Int, g: Int, b: Int)?) -> CGImage? {
+        func color(_ c: (r: Int, g: Int, b: Int)) -> CGColor {
+            CGColor(srgbRed: Double(c.r) / 255, green: Double(c.g) / 255, blue: Double(c.b) / 255, alpha: 1)
+        }
+        let alpha = background == nil ? CGImageAlphaInfo.premultipliedLast : .noneSkipLast
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: alpha.rawValue)
+        else { return nil }
+        if let background {
+            context.setFillColor(color(background))
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        let inner = CGRect(x: inset, y: inset, width: max(1, width - 2 * inset), height: max(1, height - 2 * inset))
+        let scale = max(inner.width / Double(image.width), inner.height / Double(image.height))
+        let w = Double(image.width) * scale, h = Double(image.height) * scale
+        context.saveGState()
+        context.clip(to: inner)
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: inner.midX - w / 2, y: inner.midY - h / 2, width: w, height: h))
+        context.restoreGState()
+        if let outline {
+            let line = Double(max(2, inset * 2))
+            context.setStrokeColor(color(outline))
+            context.setLineWidth(line)
+            context.stroke(inner.insetBy(dx: line / 2, dy: line / 2))
+        }
+        return context.makeImage()
+    }
+
+    /// A new picture `width` × `height` pixels with the part of `image`
+    /// inside `crop` (0 … 1, top-left origin) drawn into `rect` of it. The
+    /// rest is `background`, or see-through without one. `quick` gives up
+    /// some sharpness for speed, for frames that only last a moment.
+    static func canvas(_ image: CGImage, crop: CGRect, into rect: CGRect, width: Int, height: Int,
+                       background: (r: Int, g: Int, b: Int)?, quick: Bool) -> CGImage? {
+        let alpha = background == nil ? CGImageAlphaInfo.premultipliedLast : .noneSkipLast
+        guard let cut = self.crop(image, to: crop),
+              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: alpha.rawValue)
+        else { return nil }
+        if let background {
+            context.setFillColor(CGColor(srgbRed: Double(background.r) / 255, green: Double(background.g) / 255,
+                                         blue: Double(background.b) / 255, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        context.interpolationQuality = quick ? .medium : .high
+        // Core Graphics counts rows from the bottom.
+        context.draw(cut, in: CGRect(x: rect.minX, y: Double(height) - rect.maxY, width: rect.width, height: rect.height))
+        return context.makeImage()
     }
 
     static func load(_ url: URL, maxSide: Int) -> CGImage? {

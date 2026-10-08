@@ -149,6 +149,58 @@ enum Zoom {
         return CGRect(x: min(max(0, center.x - w / 2), 1 - w), y: min(max(0, center.y - h / 2), 1 - h), width: w, height: h)
     }
 
+    /// How much one tick of the wheel zooms: small, so a swipe is smooth.
+    static let wheelStep = 1.08
+
+    /// The next step in (1) or out (-1) from `zoom`, which may lie between steps.
+    static func stepped(_ zoom: Double, _ direction: Int) -> Double {
+        let here = direction > 0 ? steps.lastIndex { $0 <= zoom + 0.001 } ?? 0 : steps.firstIndex { $0 >= zoom - 0.001 } ?? 0
+        return steps[min(max(0, here + direction), steps.count - 1)]
+    }
+
+    /// `zoom` after `ticks` of the wheel (up, negative, zooms in). Nearly
+    /// all the way out is all the way out.
+    static func wheeled(_ zoom: Double, ticks: Int) -> Double {
+        let target = min(max(1, zoom * pow(wheelStep, Double(-ticks))), steps.last ?? 8)
+        return target < 1.02 ? 1 : target
+    }
+
+    /// The centre after moving what's shown by a share of itself (0.25 = a
+    /// quarter of what's on screen), stopping at the photo's edges.
+    static func panned(_ center: CGPoint, dx: Double, dy: Double, zoom: Double, aspect: Double, boxAspect: Double) -> CGPoint {
+        let shown = crop(zoom: zoom, center: center, aspect: aspect, boxAspect: boxAspect)
+        let moved = crop(zoom: zoom, center: CGPoint(x: shown.midX + dx * shown.width, y: shown.midY + dy * shown.height),
+                         aspect: aspect, boxAspect: boxAspect)
+        return CGPoint(x: moved.midX, y: moved.midY)
+    }
+
+    /// Where the part of the photo that's shown sits in its box (0 … 1
+    /// across and down the box): all of the box once the photo fills it,
+    /// less while there's still room beside or above it.
+    static func placement(crop: CGRect, aspect: Double, boxAspect: Double) -> CGRect {
+        let shown = aspect * crop.width / max(1e-9, crop.height)
+        let w = min(1, shown / boxAspect), h = min(1, boxAspect / shown)
+        return CGRect(x: (1 - w) / 2, y: (1 - h) / 2, width: w, height: h)
+    }
+
+    /// The centre to show at `zoom` so that the spot of the photo now under
+    /// `point` (0 … 1 across and down the box) stays under it: zooming
+    /// about the pointer, as far as the photo's edges allow.
+    static func center(zoomingTo zoom: Double, from old: Double, center: CGPoint, about point: CGPoint,
+                       aspect: Double, boxAspect: Double) -> CGPoint {
+        func share(_ p: CGPoint, of placed: CGRect) -> CGPoint {
+            CGPoint(x: min(max(0, (p.x - placed.minX) / placed.width), 1), y: min(max(0, (p.y - placed.minY) / placed.height), 1))
+        }
+        let before = crop(zoom: old, center: center, aspect: aspect, boxAspect: boxAspect)
+        let from = share(point, of: placement(crop: before, aspect: aspect, boxAspect: boxAspect))
+        let spot = CGPoint(x: before.minX + from.x * before.width, y: before.minY + from.y * before.height)
+        let after = crop(zoom: zoom, center: center, aspect: aspect, boxAspect: boxAspect)
+        let to = share(point, of: placement(crop: after, aspect: aspect, boxAspect: boxAspect))
+        let wanted = CGPoint(x: spot.x - to.x * after.width + after.width / 2, y: spot.y - to.y * after.height + after.height / 2)
+        let moved = crop(zoom: zoom, center: wanted, aspect: aspect, boxAspect: boxAspect)
+        return CGPoint(x: moved.midX, y: moved.midY)
+    }
+
     /// The zoom at which `crop` (as from `Faces.crop`) fills the box.
     static func level(showing crop: CGRect, aspect: Double, boxAspect: Double) -> Double {
         max(1, max(1, boxAspect / aspect) / max(0.01, crop.width))

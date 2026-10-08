@@ -41,6 +41,7 @@ pixelgraph scan --from 2024-06 --to 2024-08  # part of your library
 pixelgraph scan --folder /Volumes/T7/DCIM    # a folder, drive or iCloud Drive folder
 pixelgraph review                            # pick up where you left off
 pixelgraph review --of Banff                 # a review set aside
+pixelgraph gallery --album "Japan 2025"      # just look through photos: an album, folder, months, or everything
 pixelgraph scan --again                      # scan the last place again, from scratch
 pixelgraph report                            # the last scan as a web page
 pixelgraph undo                              # put back the last move
@@ -65,7 +66,7 @@ One key means one thing on every screen, and keys set a state rather than toggli
 | A | on the groups: accept every clear group as PixelGraph chose · in a group: select every photo, and the next K, X, R or M applies to all of them (Esc clears) |
 | R | say why it's moving |
 | C | compare two photos side by side: ← → change the candidate, ↑ pins it |
-| + − | on the groups and in a group: bigger or smaller cards and photos, fewer or more a row (0 goes back to the automatic fit; your size is kept for next time). While looking closer or comparing: zoom in and out, up to 8× (the mouse wheel too). Zoomed in, ← → ↑ ↓ or a drag move around, N and P go to the next or previous photo at the same zoom and spot, and 0 shows the whole photo again. Compare zooms both sides together. Zooming uses the full-size photo: a folder's file, or the library's original, fetched from iCloud for just that photo if it isn't on the Mac (not with Stay offline on). When only the 2048-pixel preview can be had, the header says "preview only" |
+| + − | on the groups and in a group: bigger or smaller cards and photos, fewer or more a row (0 goes back to the automatic fit; your size is kept for next time). While looking closer or comparing: zoom in and out, up to 8×. The mouse wheel, or two fingers on a trackpad, zooms smoothly instead of in steps, keeping the spot under the pointer where it is; the photo is redrawn in place, so the screen never blanks, and sharpens when you stop. Zoomed in, ← → ↑ ↓ or a drag move around, N and P go to the next or previous photo at the same zoom and spot, and 0 shows the whole photo again. Compare zooms both sides together. Zooming uses the full-size photo: a folder's file, or the library's original, fetched from iCloud for just that photo if it isn't on the Mac (not with Stay offline on). When only the 2048-pixel preview can be had, the header says "preview only" |
 | Z | while looking closer or comparing: zoom in on the faces, to check eyes · again for the whole photo |
 | O | show the photo in Finder (Photos library photos open in Photos) |
 | M | move the selection to PGDuplicates, or D (the red button) to delete it — asked in the bottom bar first |
@@ -81,9 +82,26 @@ One key means one thing on every screen, and keys set a state rather than toggli
 In iTerm2, WezTerm, kitty and Ghostty photos are shown as real images; other true-colour terminals get colour-block previews. In a group, each photo's frame says what happens to it: green for the best (kept by default), teal for others you keep, red for those moving, grey once moved; the highlighted photo's frame is thick. Photos selected to move are shown muted, not darkened, so they're still easy to judge. Nothing pops up over the screen: a question (move or delete, why it's moving, save your settings) is asked in the bottom two rows, where clicking a button does what it says and clicking anywhere else cancels, and `?` shows the keys as a page of their own.
 
 
-**Scanning again.** `R` on the groups screen, `R` on a review under "Continue reviewing" on the start screen, or `pixelgraph scan --again` scans the same folder, album or months again from scratch, with your current settings, and opens the new review. Your choices in the old review are dropped; photos already moved stay moved. Measurements are cached, so it takes seconds.
+**Scanning again.** `R` on the groups screen, `R` on a review under "Continue reviewing" on the start screen, `R` on a folder's own page, or `pixelgraph scan --again` scans the same folder, album or months again from scratch, with your current settings, and opens the new review. `R` asks first, in the bottom bar. Your choices in the old review are dropped; photos already moved stay moved. Measurements are cached, so it takes seconds.
 
 **Editing.** `e` opens the highlighted photo in Photos' editor (after `a`, every photo in the group goes into a "PG Edit" album in Photos: Return edits, → goes to the next). Photos from folders and drives open in Preview. When you come back, the previews show your edit. Opening straight into Edit presses Return in Photos for you, which needs your terminal allowed in System Settings → Privacy & Security → Accessibility; without it the photo is just shown and you press Return. Edits in Photos can always be undone with Image → Revert to Original.
+### Looking through photos
+
+`pixelgraph gallery` shows your photos the way Photos shows a library: a grid of square tiles, oldest at the top, opened at the newest. With no option it's your whole library; `--album`, `--folder` or `--from`/`--to` choose a part of it. On the start screen, `g` opens the highlighted album, month or folder. Nothing in the gallery changes your photos.
+
+| Key | Does |
+|---|---|
+| ← → ↑ ↓ | choose a photo (Page Up/Down a screen at a time; Home and End the oldest and the newest) |
+| mouse wheel, two fingers | scroll, a couple of rows of text at a time, so it glides rather than jumps |
+| + − | bigger or smaller tiles (0 is the usual size; your size is kept for next time) |
+| Space, Enter | open the photo; a click chooses a photo and a second click opens it |
+| O | show it in Finder, or in Photos |
+| Esc | back |
+
+In a photo, ← → go to the one before and the next, and zooming is the same as in the review: the wheel or two fingers zoom smoothly about the pointer, + − step, a drag or the arrows move around, 0 shows the whole photo. The photo appears at once from its small copy and sharpens as the bigger ones load; the full-size one is fetched only once you've zoomed in and stopped.
+
+Tiles load in the background, the ones in view first. In iTerm2 and WezTerm scrolling moves what's on screen and sends only the rows coming into view; kitty and Ghostty have every tile sent again at each step, which is heavier. Pinching can't be done: terminals aren't told about it.
+
 ### Documents
 
 Receipts, bills, forms, letters, IDs, tickets, notes, whiteboards, screenshots and photos of screens are sorted onto their own **Documents** tab (press Tab on the groups screen). Each is named — "Pier 39 Café receipt", "Form · I-797C notice" — from its text, read on your Mac. Copies of a document are matched by **what they say**, not just how they look, so two forms from the same template with different names are never treated as duplicates. The best copy is filed in **PGDocuments**; extra copies go to Duplicates. On that tab, `d` files a copy, `k` keeps it where it is, `x` marks it as a copy.
